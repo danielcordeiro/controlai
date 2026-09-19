@@ -25,11 +25,24 @@ const supabase = isConfigured
     })
   : null;
 
-/** true quando a URL atual é o retorno de um link mágico/código do e-mail. */
+/** true quando a URL atual é o retorno de um link mágico/código do e-mail
+ *  — inclusive quando o retorno é de ERRO (link expirado ou já usado). */
 export function chegouDoEmail() {
-  const h = String(location.hash || "");
-  const q = String(location.search || "");
-  return /access_token=|[?&#]code=|type=(magiclink|recovery|email|signup)/.test(h + q);
+  const u = String(location.hash || "") + String(location.search || "");
+  return /access_token=|[?&#]code=|[?&#]error=|error_code=|type=(magiclink|recovery|email|signup)/.test(u);
+}
+
+/** Mensagem do erro que o Supabase devolveu no retorno do e-mail, ou null. */
+export function erroDoEmail() {
+  const u = String(location.hash || "").replace(/^#/, "") + "&" + String(location.search || "").replace(/^\?/, "");
+  const p = new URLSearchParams(u);
+  if (!p.get("error") && !p.get("error_code")) return null;
+  const desc = p.get("error_description");
+  if (desc) return decodeURIComponent(desc.replace(/\+/g, " "));
+  const code = p.get("error_code") || p.get("error");
+  return code === "otp_expired"
+    ? "O link expirou. Peça um novo."
+    : `Não consegui confirmar o e-mail (${code}).`;
 }
 
 /** Traduz o erro do Supabase para uma frase que o usuário entende. */

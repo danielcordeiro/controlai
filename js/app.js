@@ -1,6 +1,6 @@
 // Controlaí — app (vanilla ES modules, sem build).
 // Rotas: #/ (home) · #/c/<uuid> (carteira) · #/recuperar (recuperar ID por e-mail)
-import { db, auth, isConfigured, chegouDoEmail } from "./db.js";
+import { db, auth, isConfigured, chegouDoEmail, erroDoEmail } from "./db.js";
 import {
   el, clear, fmtBRL, fmtBRLCurto, parseAmountToCents, toast, confirmAction, copyText,
   hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct, downloadText,
@@ -20,8 +20,11 @@ const state = {
   tab: "mes", // mes | despesas | plano | ajustes
 };
 
-// veio do link do e-mail? precisa ser lido ANTES do supabase-js limpar a URL
-const VEIO_DO_EMAIL = chegouDoEmail();
+// Veio do link do e-mail? Precisa ser lido ANTES de o supabase-js limpar a URL.
+// É `let` porque a informação se consome: depois de usada uma vez, um logout
+// voluntário não pode voltar a acusar "link expirado".
+let veioDoEmail = chegouDoEmail();
+const ERRO_DO_EMAIL = erroDoEmail();
 
 // ---------------------------------------------------------------------------
 // Carteiras lembradas neste aparelho
@@ -62,7 +65,17 @@ function parseRoute() {
   return { name: "home" };
 }
 
+/** Fecha qualquer folha/modal aberta — ela vive no body e sobreviveria à troca de tela. */
+function fecharModais() {
+  document.querySelectorAll(".overlay").forEach((o) => o.remove());
+}
+
+// A última resposta a chegar não pode vencer a última pedida (rede lenta, dois
+// toques seguidos no ‹ ›). Cada carga leva um número; respostas velhas morrem.
+let reqAtual = 0;
+
 async function router() {
+  fecharModais();
   const r = parseRoute();
   if (r.name === "carteira") {
     if (state.ledgerId !== r.id) {
@@ -81,34 +94,50 @@ async function router() {
 }
 
 async function carregar() {
+  const meu = ++reqAtual;
+  const idPedido = state.ledgerId;
   state.loading = true;
   state.erro = null;
   render();
   try {
-    state.snapshot = await db.mes(state.ledgerId, state.mes);
-    lembrarCarteira(state.ledgerId, state.snapshot?.ledger?.name);
+    const snap = await db.mes(idPedido, state.mes);
+    if (meu !== reqAtual) return;            // chegou tarde: outra carga já mandou
+    state.snapshot = snap;
+    lembrarCarteira(snap?.ledger?.id || idPedido, snap?.ledger?.name);
     db.track("pageview", "carteira");
   } catch (e) {
+    if (meu !== reqAtual) return;
     state.snapshot = null;
     state.erro = e.message;
   } finally {
-    state.loading = false;
-    render();
+    if (meu === reqAtual) {
+      state.loading = false;
+      render();
+    }
   }
 }
 
-async function recarregar() {
+/**
+ * Recarrega o snapshot. O mês só passa a valer se a resposta chegar: senão a
+ * tela mostraria os números de um mês sob o título de outro.
+ */
+async function recarregar(mes = state.mes) {
+  const meu = ++reqAtual;
+  const idPedido = state.ledgerId;
   try {
-    state.snapshot = await db.mes(state.ledgerId, state.mes);
+    const snap = await db.mes(idPedido, mes);
+    if (meu !== reqAtual) return;
+    state.mes = mes;
+    state.snapshot = snap;
   } catch (e) {
+    if (meu !== reqAtual) return;
     toast(e.message, "error");
   }
-  render();
+  if (meu === reqAtual) render();
 }
 
 function irParaMes(novoMes) {
-  state.mes = novoMes;
-  recarregar();
+  recarregar(novoMes);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +309,10 @@ async function renderRecuperar() {
     btn,
     el("a", { class: "btn btn--ghost btn--block", href: "#/", text: "Voltar" }),
   );
-  if (VEIO_DO_EMAIL) toast("Link expirado ou já usado. Peça um novo.", "error");
+  if (veioDoEmail) {
+    toast(ERRO_DO_EMAIL || "Link expirado ou já usado. Peça um novo.", "error");
+    veioDoEmail = false; // a informação se consome: não repetir no próximo acesso
+  }
 }
 
 function renderConfirmarCodigo(email) {
@@ -491,7 +523,11 @@ function cardTotal(total, anterior) {
   const varPct = variacaoPct(total, anterior);
   let cmp = null;
   if (varPct == null) {
-    cmp = anterior > 0 ? null : "Primeiro mês com lançamentos.";
+    // sem base de comparação: "primeiro mês" só se não houver NENHUM mês
+    // anterior com gasto (um mês pulado no meio não é o primeiro)
+    const meses = state.snapshot?.meses_com_gasto || [];
+    const houveAntes = meses.some((m) => m < state.mes);
+    cmp = houveAntes ? "Nada lançado no mês anterior." : "Primeiro mês com lançamentos.";
   } else if (Math.abs(varPct) < 1) {
     cmp = `Praticamente igual ao mês anterior (${fmtBRL(anterior)}).`;
   } else {
@@ -688,10 +724,8 @@ function abrirFormDespesa(despesa) {
         db.track("lancar_despesa", "carteira");
       }
       fechar();
-      // lançou em outro mês? vai junto, senão a despesa "some" da tela
-      const mesDaDespesa = mesDe(data.value);
-      if (mesDaDespesa !== state.mes) state.mes = mesDaDespesa;
-      await recarregar();
+      // lançou em outro mês? a tela vai junto, senão a despesa "some"
+      await recarregar(mesDe(data.value));
       toast(editando ? "Despesa atualizada." : "Despesa lançada.", "success");
     } catch (err) {
       toast(err.message, "error");
@@ -1011,7 +1045,7 @@ function openModal(title, contentNode) {
 // ---------------------------------------------------------------------------
 window.addEventListener("hashchange", router);
 
-if (VEIO_DO_EMAIL && !parseRoute().id) {
+if (veioDoEmail && !parseRoute().id) {
   // Voltou do link mágico do e-mail. O token vem no fragmento da URL e quem o
   // consome é o supabase-js, de forma assíncrona. Trocar a rota agora apagaria
   // o fragmento ANTES disso e a sessão nunca seria criada — por isso esperamos

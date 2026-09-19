@@ -38,6 +38,18 @@ create table if not exists controlai.ledger (
 );
 create index if not exists ledger_email_idx on controlai.ledger (email);
 
+-- Todos os e-mails já registrados nesta carteira. Quem tem o link pode trocar o
+-- e-mail; guardando o histórico, a troca deixa de ser destrutiva e o dono
+-- continua recuperando pelo endereço antigo. Não abre exposição nova: quem teve
+-- o link já tem acesso permanente por ele.
+create table if not exists controlai.ledger_email (
+  ledger_id uuid not null references controlai.ledger(id) on delete cascade,
+  email     text not null,
+  added_at  timestamptz not null default now(),
+  primary key (ledger_id, email)
+);
+create index if not exists ledger_email_email_idx on controlai.ledger_email (email);
+
 -- Plano de contas: até 2 níveis (categoria > subcategoria).
 create table if not exists controlai.category (
   id         uuid primary key default gen_random_uuid(),
@@ -91,6 +103,7 @@ alter table controlai.ledger         enable row level security;
 alter table controlai.category       enable row level security;
 alter table controlai.payment_method enable row level security;
 alter table controlai.expense        enable row level security;
+alter table controlai.ledger_email   enable row level security;
 
 -- ============================================================================
 -- Helpers internos (schema controlai, NÃO expostos)
@@ -200,14 +213,22 @@ create or replace function public.controlai_criar(p_name text, p_email text)
 returns json
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare
   v_id    uuid;
   v_email text;
   v_nome  text;
+  v_qtd   integer;
 begin
   v_email := controlai._email_ok(p_email);
+
+  -- trava simples de abuso: este banco é compartilhado com o Rachaí
+  select count(*) into v_qtd from controlai.ledger where email = v_email;
+  if v_qtd >= 30 then
+    raise exception 'Muitas carteiras neste e-mail. Recupere uma existente em vez de criar outra.';
+  end if;
+
   v_nome  := btrim(coalesce(p_name, ''));
   if v_nome = '' then
     v_nome := 'Minhas despesas';
@@ -217,6 +238,7 @@ begin
   end if;
 
   insert into controlai.ledger (name, email) values (v_nome, v_email) returning id into v_id;
+  insert into controlai.ledger_email (ledger_id, email) values (v_id, v_email) on conflict do nothing;
 
   insert into controlai.category (ledger_id, name, color, sort_order) values
     (v_id, 'Moradia',      '#8b5cf6', 10),
@@ -249,7 +271,7 @@ create or replace function public.controlai_mes(p_ledger uuid, p_mes text defaul
 returns json
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare
   v_ledger uuid;
@@ -310,7 +332,7 @@ create or replace function public.controlai_meus_ids()
 returns json
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_email text;
 begin
@@ -326,7 +348,9 @@ begin
              'despesas', (select count(*) from controlai.expense e where e.ledger_id = l.id))
            order by l.last_seen_at desc)
       from controlai.ledger l
-     where l.email = v_email), '[]'::json);
+     where l.email = v_email
+        or exists (select 1 from controlai.ledger_email le
+                    where le.ledger_id = l.id and le.email = v_email)), '[]'::json);
 end;
 $$;
 
@@ -337,7 +361,7 @@ create or replace function public.controlai_add_despesa(
 returns uuid
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare
   v_ledger uuid;
@@ -381,7 +405,7 @@ create or replace function public.controlai_update_despesa(
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid;
 begin
@@ -415,7 +439,7 @@ create or replace function public.controlai_del_despesa(p_ledger uuid, p_expense
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid;
 begin
@@ -431,7 +455,7 @@ create or replace function public.controlai_add_categoria(
 returns uuid
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare
   v_ledger uuid;
@@ -467,7 +491,7 @@ create or replace function public.controlai_update_categoria(
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid; v_nome text;
 begin
@@ -493,7 +517,7 @@ create or replace function public.controlai_del_categoria(p_ledger uuid, p_categ
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid;
 begin
@@ -514,7 +538,7 @@ create or replace function public.controlai_add_forma(p_ledger uuid, p_name text
 returns uuid
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare
   v_ledger uuid;
@@ -539,7 +563,7 @@ create or replace function public.controlai_update_forma(
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid; v_nome text;
 begin
@@ -563,7 +587,7 @@ create or replace function public.controlai_del_forma(p_ledger uuid, p_method uu
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid;
 begin
@@ -578,7 +602,7 @@ create or replace function public.controlai_renomear(p_ledger uuid, p_name text)
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_nome text;
 begin
@@ -595,11 +619,15 @@ create or replace function public.controlai_set_email(p_ledger uuid, p_email tex
 returns void
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
+declare v_ledger uuid; v_email text;
 begin
-  perform controlai._ledger_ok(p_ledger);
-  update controlai.ledger set email = controlai._email_ok(p_email) where id = p_ledger;
+  v_ledger := controlai._ledger_ok(p_ledger);
+  v_email  := controlai._email_ok(p_email);
+  update controlai.ledger set email = v_email where id = v_ledger;
+  -- nunca remove o anterior: o dono continua recuperando pelo endereço antigo
+  insert into controlai.ledger_email (ledger_id, email) values (v_ledger, v_email) on conflict do nothing;
 end;
 $$;
 
@@ -608,7 +636,7 @@ create or replace function public.controlai_exportar(p_ledger uuid)
 returns json
 language plpgsql
 security definer
-set search_path = controlai, public
+set search_path = controlai, public, pg_temp
 as $$
 declare v_ledger uuid;
 begin
