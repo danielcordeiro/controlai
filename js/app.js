@@ -3,11 +3,13 @@
 import { db, auth, isConfigured, chegouDoEmail, erroDoEmail } from "./db.js";
 import {
   el, clear, fmtBRL, fmtBRLCurto, parseAmountToCents, toast, confirmAction, copyText,
-  hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct, downloadText, MAX_CENTAVOS,
+  hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct,
+  downloadText, downloadBytes, MAX_CENTAVOS,
 } from "./ui.js";
 import {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
 } from "./report.js";
+import { despesasParaXLSX } from "./xlsx.js";
 
 const root = () => document.getElementById("app");
 
@@ -19,7 +21,7 @@ const state = {
   trocandoMes: false,
   novaCarteira: null,   // id da carteira recém-criada: mostra o link uma vez
   erro: null,
-  tab: "mes", // mes | despesas | plano | ajustes
+  tab: "mes", // mes | despesas | plano | ia | ajustes
 };
 
 // Veio do link do e-mail? Precisa ser lido ANTES de o supabase-js limpar a URL.
@@ -413,6 +415,7 @@ function renderCarteira() {
   const conteudo =
     state.tab === "despesas" ? abaDespesas()
     : state.tab === "plano" ? abaPlano()
+    : state.tab === "ia" ? abaIA()
     : state.tab === "ajustes" ? abaAjustes()
     : abaMes();
 
@@ -429,6 +432,7 @@ function renderCarteira() {
         tabBtn("mes", "Mês"),
         tabBtn("despesas", "Despesas"),
         tabBtn("plano", "Categorias"),
+        tabBtn("ia", "IA"),
         tabBtn("ajustes", "Ajustes"),
       ]),
       conteudo,
@@ -1074,6 +1078,125 @@ function abrirFormForma(f) {
   const { close } = openModal("Editar forma de pagamento", corpo);
 }
 
+// ---- aba IA ----------------------------------------------------------------
+/**
+ * Conecta o Controlaí a uma IA. Dois caminhos:
+ *  1. conector MCP no claude.ai — a URL leva o token no fim, cada pessoa cadastra a sua;
+ *  2. bloco de instruções para colar em Claude Code, Cursor ou ChatGPT, que falam
+ *     direto com a API REST.
+ * O token é separado do link da carteira de propósito: revogar o acesso da IA
+ * não derruba o seu link, e trocar o link não desconecta a IA.
+ */
+function abaIA() {
+  const s = state.snapshot;
+  const cfg = window.CONTROLAI_CONFIG || {};
+  const base = String(cfg.SUPABASE_URL || "").replace(/\/$/, "");
+
+  const campoToken = el("code", { text: "gerando…" });
+  const campoUrl = el("code", { text: "gerando…" });
+  const btnToken = el("button", { class: "btn btn--ghost btn--sm", text: "Copiar token", disabled: "" });
+  const btnUrl = el("button", { class: "btn btn--primary btn--sm", text: "Copiar URL", disabled: "" });
+  const prompt = el("textarea", { class: "input prompt", rows: "8", readonly: "" });
+  const btnPrompt = el("button", { class: "btn btn--ghost btn--block", text: "Copiar instruções", disabled: "" });
+  const btnRotacionar = el("button", { class: "btn btn--danger btn--block", text: "Gerar um token novo (desconecta as IAs)" });
+
+  function aplica(token) {
+    const url = `${base}/functions/v1/controlai-mcp/${token}`;
+    campoToken.textContent = token;
+    campoUrl.textContent = url;
+    btnToken.removeAttribute("disabled");
+    btnUrl.removeAttribute("disabled");
+    btnPrompt.removeAttribute("disabled");
+    btnToken.onclick = async () =>
+      toast((await copyText(token)) ? "Token copiado." : "Não consegui copiar.", "success");
+    btnUrl.onclick = async () =>
+      toast((await copyText(url)) ? "URL do conector copiada." : "Não consegui copiar.", "success");
+    prompt.value = montaPromptIA(base, cfg.SUPABASE_ANON_KEY || "", token);
+    btnPrompt.onclick = async () =>
+      toast((await copyText(prompt.value)) ? "Instruções copiadas." : "Não consegui copiar.", "success");
+  }
+
+  db.getApiToken(state.ledgerId).then(aplica, (e) => {
+    campoToken.textContent = "erro ao gerar";
+    campoUrl.textContent = "-";
+    prompt.value = "Não foi possível gerar o token. Recarregue a página.";
+    toast(e.message, "error");
+  });
+
+  btnRotacionar.onclick = async () => {
+    if (!confirmAction("Gerar um token novo? Os conectores e conversas que usam o token atual param de funcionar até você atualizar a URL.")) return;
+    try {
+      const novo = await db.rotateApiToken(state.ledgerId);
+      aplica(novo);
+      toast("Token trocado. Atualize a URL no conector.", "success");
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  return el("div", {}, [
+    el("p", { class: "muted", style: "margin:0 0 14px" , text:
+      "Deixe uma IA lançar despesa e responder \u201cquanto gastei esse mês\u201d por você — é só conversar." }),
+
+    el("div", { class: "card" }, [
+      el("h3", { class: "sheet__title", text: "Conector no Claude" }),
+      el("p", { class: "small muted", style: "margin:6px 0 10px", text:
+        "No Claude (app ou site): Customize → Connectors → Add custom connector. Cole a URL abaixo e salve." }),
+      el("div", { class: "idbox" }, [campoUrl]),
+      el("div", { class: "row2" }, [btnUrl, btnToken]),
+      el("ol", { class: "steps", style: "margin-top:14px" }, [
+        el("li", { text: "Copie a URL acima." }),
+        el("li", { text: "No Claude, vá em Customize → Connectors → Add custom connector." }),
+        el("li", { text: "Cole a URL e clique em Add. Não precisa preencher OAuth." }),
+        el("li", { text: "Fale natural: \u201cgastei 62 no mercado hoje\u201d ou \u201cresumo do mês\u201d." }),
+      ]),
+      el("p", { class: "small muted", style: "margin-top:10px", text:
+        "A URL contém o seu token: trate como senha. Quem tiver ela lança e lê despesas desta carteira." }),
+    ]),
+
+    el("div", { class: "card" }, [
+      el("h3", { class: "sheet__title", text: "Claude Code, Cursor, ChatGPT" }),
+      el("p", { class: "small muted", style: "margin:6px 0 8px", text:
+        "Para IA que acessa a web mas não usa conector: cole o bloco abaixo na conversa. Ela passa a usar a API direto, sem instalar nada." }),
+      prompt,
+      btnPrompt,
+    ]),
+
+    el("div", { class: "card" }, [
+      el("h3", { class: "sheet__title", text: "Revogar o acesso" }),
+      el("p", { class: "small muted", style: "margin:6px 0 10px", text:
+        "O token da IA é separado do link da carteira: trocar um não mexe no outro." }),
+      btnRotacionar,
+    ]),
+  ]);
+}
+
+/** Bloco que a pessoa cola numa IA com acesso a HTTP. */
+function montaPromptIA(base, anon, token) {
+  const rpc = `${base}/rest/v1/rpc`;
+  return [
+    "Você vai cuidar das minhas despesas pessoais no Controlaí, via API REST (curl).",
+    "",
+    `Base: ${rpc}`,
+    "Em toda requisição: POST, com os headers",
+    `  apikey: ${anon}`,
+    "  Content-Type: application/json",
+    `E sempre inclua no corpo: "p_token": "${token}"`,
+    "",
+    "Antes de lançar a primeira despesa, chame controlai_api_contexto para ver as",
+    "categorias que existem. Valores em REAIS (62.90), categoria pelo NOME.",
+    "",
+    "Funções:",
+    "  controlai_api_contexto   {}",
+    "  controlai_api_lancar     {p_valor, p_categoria, p_data?, p_forma?, p_descricao?}",
+    "  controlai_api_resumo     {p_mes?}            -> total do mês por categoria",
+    "  controlai_api_listar     {p_mes?, p_categoria?, p_limite?}",
+    "  controlai_api_editar     {p_id, p_valor?, p_categoria?, p_data?, p_forma?, p_descricao?}",
+    "  controlai_api_apagar     {p_id}",
+    "  controlai_api_criar_categoria {p_nome, p_pai?}",
+    "",
+    "Confirme comigo antes de apagar qualquer coisa.",
+  ].join("\n");
+}
+
 // ---- aba AJUSTES -----------------------------------------------------------
 function abaAjustes() {
   const s = state.snapshot;
@@ -1116,14 +1239,32 @@ function abaAjustes() {
 
     el("div", { class: "card" }, [
       el("h3", { class: "sheet__title", text: "Exportar" }),
-      el("p", { class: "small muted", style: "margin:6px 0 10px", text: "Baixa todas as despesas em CSV (abre no Excel e no Google Sheets)." }),
+      el("p", { class: "small muted", style: "margin:6px 0 10px", text: "A planilha sai com a data como data e o valor como moeda, cabeçalho congelado e filtro — dá para somar e montar tabela dinâmica na hora." }),
       el("button", {
-        class: "btn btn--ghost btn--block", text: "Baixar CSV de tudo",
+        class: "btn btn--primary btn--block", text: "Baixar Excel (.xlsx)",
+        onClick: async (ev) => {
+          const b = ev.currentTarget;
+          b.disabled = true;
+          const antes = b.textContent;
+          b.textContent = "Montando...";
+          try {
+            const todas = await db.exportar(state.ledgerId);
+            const bytes = despesasParaXLSX(todas, s.categories, s.payment_methods);
+            downloadBytes(`${arquivoBase(s.ledger.name)}.xlsx`, bytes,
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            db.track("exportar_xlsx", "carteira");
+            toast(`${todas.length} lançamento(s) exportado(s).`, "success");
+          } catch (e) { toast(e.message, "error"); }
+          b.disabled = false;
+          b.textContent = antes;
+        },
+      }),
+      el("button", {
+        class: "btn btn--ghost btn--block", text: "Prefiro CSV",
         onClick: async () => {
           try {
             const todas = await db.exportar(state.ledgerId);
-            const csv = montaCSV(todas, s.categories, s.payment_methods);
-            downloadText(`controlai-${s.ledger.name.replace(/\W+/g, "-").toLowerCase()}.csv`, csv);
+            downloadText(`${arquivoBase(s.ledger.name)}.csv`, montaCSV(todas, s.categories, s.payment_methods));
             db.track("exportar_csv", "carteira");
           } catch (e) { toast(e.message, "error"); }
         },
@@ -1184,6 +1325,14 @@ function abaAjustes() {
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
+/** "Casa do Daniel" -> "controlai-casa-do-daniel-2026-09" */
+function arquivoBase(nome) {
+  const limpo = String(nome || "despesas")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\W+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "despesas";
+  return `controlai-${limpo}-${hojeISO()}`;
+}
+
 const PALETA = ["#8b5cf6", "#ef4444", "#f97316", "#3b82f6", "#10b981", "#6366f1",
   "#ec4899", "#14b8a6", "#a855f7", "#eab308", "#06b6d4", "#84cc16"];
 

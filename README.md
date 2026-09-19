@@ -35,10 +35,21 @@ A carteira abre em 4 abas:
 - Cor por categoria, **arquivar** (some do formulário e preserva o histórico) e excluir.
 - **Formas de pagamento** — informar é opcional em cada despesa.
 
+### 🤖 IA
+- **Conector no Claude**: a aba entrega a URL pronta para colar em
+  *Customize → Connectors → Add custom connector*. Aí é só falar:
+  *"gastei 62 no mercado hoje"*, *"resumo do mês"*, *"quanto foi em transporte?"*.
+- Para **Claude Code, Cursor ou ChatGPT**, um bloco de instruções para colar na
+  conversa, que usa a API REST direto.
+- **Token separado do link**: revogar o acesso da IA não derruba o seu link, e
+  trocar o link não desconecta a IA.
+
 ### ⚙️ Ajustes
 - Seu **ID/link** de acesso, com botão de copiar.
 - Nome da carteira e **e-mail de recuperação** (o antigo continua valendo para recuperar).
-- **Exportar CSV** de todas as despesas (abre no Excel/Sheets).
+- **Exportar Excel (.xlsx)**: data como data, valor como moeda, cabeçalho
+  congelado e filtro — dá para somar e montar tabela dinâmica na hora. CSV
+  continua disponível como alternativa.
 - **Gerar um ID novo** — se o link vazar, isso derruba o antigo na hora sem perder nada.
 - **Apagar a carteira** de vez, self-service.
 
@@ -76,8 +87,12 @@ js/
   db.js               # chamadas RPC + fluxo de recuperação (Supabase Auth)
   report.js           # agregações do mês (puras, testadas)
   ui.js               # DOM, dinheiro em centavos, datas/meses, toasts
+  xlsx.js             # gerador de .xlsx (ZIP + OOXML), sem dependência
 supabase/
   schema.sql          # tabelas + RPCs + permissões (rodar uma vez)
+  api-ia.sql          # token e funções da API para IA
+  analytics.sql       # relatórios de uso separados dos do Rachaí
+  functions/controlai-mcp/   # servidor MCP (Edge Function) do conector
 tests/unit.mjs        # testes das funções puras
 docs/                 # doc técnica e operação
 ```
@@ -148,9 +163,24 @@ schema `controlai` e as funções levam prefixo. O analytics reaproveita o
 separados — `analytics_summary()` voltou a contar só o Rachaí e
 `controlai_analytics_summary()` conta só este app.
 
+### Conector de IA (MCP)
+O servidor MCP roda como Edge Function no mesmo projeto, em
+`supabase/functions/controlai-mcp/`. Já está publicado. Para reimplantar:
+
+```bash
+supabase functions deploy controlai-mcp --no-verify-jwt --project-ref wkuykhomucxskelbcpmi
+```
+
+`--no-verify-jwt` é obrigatório: o claude.ai não manda chave do Supabase, e a
+autenticação é o token `ctl_...` no fim da URL, validado dentro da função.
+
+Ferramentas expostas: `contexto`, `lancar_despesa`, `resumo_do_mes`,
+`listar_despesas`, `editar_despesa`, `apagar_despesa`, `criar_categoria`.
+
 ### Se for clonar em outro projeto Supabase
-Rode `supabase/schema.sql` inteiro (idempotente) e depois `supabase/analytics.sql`,
-e preencha o `config.js` a partir do `config.example.js`.
+Rode `supabase/schema.sql`, depois `supabase/api-ia.sql` e `supabase/analytics.sql`
+(todos idempotentes), publique a Edge Function e preencha o `config.js` a partir
+do `config.example.js`.
 
 ---
 

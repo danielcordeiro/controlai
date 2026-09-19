@@ -217,6 +217,107 @@ grupo("maioresDespesas", () => {
   eq(maioresDespesas([], 3).length, 0, "vazio");
 });
 
+// ---------------------------------------------------------------- planilha Excel
+const { montaXLSX, despesasParaXLSX, crc32, serialData, celulaRef, zip } =
+  await import("../js/xlsx.js");
+
+/** Lê um ZIP "stored" e devolve { nome: conteudo } — valida a estrutura de verdade. */
+function abreZip(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // acha o End Of Central Directory
+  let eocd = -1;
+  for (let i = bytes.length - 22; i >= 0; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("EOCD não encontrado: não é um ZIP");
+  const qtd = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const saida = {};
+  const dec = new TextDecoder();
+  for (let i = 0; i < qtd; i++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new Error("cabeçalho central inválido");
+    const crcEsperado = dv.getUint32(p + 16, true);
+    const tam = dv.getUint32(p + 24, true);
+    const nomeLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const comLen = dv.getUint16(p + 32, true);
+    const off = dv.getUint32(p + 42, true);
+    const nome = dec.decode(bytes.slice(p + 46, p + 46 + nomeLen));
+    // vai ao cabeçalho local para extrair o conteúdo
+    if (dv.getUint32(off, true) !== 0x04034b50) throw new Error("cabeçalho local inválido");
+    const nomeLenL = dv.getUint16(off + 26, true);
+    const extraLenL = dv.getUint16(off + 28, true);
+    const ini = off + 30 + nomeLenL + extraLenL;
+    const corpo = bytes.slice(ini, ini + tam);
+    if (crc32(corpo) !== crcEsperado) throw new Error(`CRC não confere em ${nome}`);
+    saida[nome] = dec.decode(corpo);
+    p += 46 + nomeLen + extraLen + comLen;
+  }
+  return saida;
+}
+
+grupo("xlsx — ZIP e estrutura", () => {
+  eq(crc32(new TextEncoder().encode("123456789")), 0xcbf43926, "CRC32 do vetor conhecido");
+  eq(celulaRef(0, 0), "A1", "primeira célula");
+  eq(celulaRef(1, 25), "Z2", "coluna Z");
+  eq(celulaRef(0, 26), "AA1", "coluna AA");
+  eq(celulaRef(0, 27), "AB1", "coluna AB");
+  // Serial do Excel: base 1899-12-30. Conferido contra o calendário real.
+  eq(serialData("2026-09-19"), 46284, "serial de 19/09/2026");
+  eq(serialData("2026-01-01"), 46023, "virada de ano");
+  eq(serialData("2024-02-29"), 45351, "29/02 de ano bissexto");
+  eq(serialData("2026-09-19") - serialData("2026-09-18"), 1, "um dia = um ponto");
+  eq(serialData("xx"), null, "data inválida");
+  // Nota: para datas anteriores a 01/03/1900 o Excel tem o bug do ano bissexto
+  // de 1900 e fica 1 à frente. Irrelevante para despesa, mas fica registrado.
+
+  const z = zip([{ nome: "a.txt", conteudo: "olá" }, { nome: "b/c.xml", conteudo: "<x/>" }]);
+  const lido = abreZip(z);
+  eq(Object.keys(lido).length, 2, "dois arquivos no zip");
+  eq(lido["a.txt"], "olá", "conteúdo com acento preservado");
+  eq(lido["b/c.xml"], "<x/>", "arquivo em subpasta");
+});
+
+grupo("xlsx — planilha das despesas", () => {
+  const bytes = despesasParaXLSX(DESP, CATS, FORMAS, new Date("2026-09-19T12:00:00Z"));
+  ok(bytes instanceof Uint8Array && bytes.length > 500, "gera bytes");
+  eq(bytes[0], 0x50, "assina PK");
+  eq(bytes[1], 0x4b, "assina PK");
+
+  const z = abreZip(bytes);
+  for (const parte of ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml",
+    "xl/_rels/workbook.xml.rels", "xl/styles.xml", "xl/worksheets/sheet1.xml"]) {
+    ok(z[parte] !== undefined, `contém ${parte}`);
+  }
+
+  const sheet = z["xl/worksheets/sheet1.xml"];
+  ok(sheet.includes("<t>Data</t>"), "cabeçalho Data");
+  ok(sheet.includes("<t>Subcategoria</t>"), "coluna de subcategoria");
+  ok(sheet.includes("state=\"frozen\""), "cabeçalho congelado");
+  ok(sheet.includes("<autoFilter"), "filtro automático");
+  // valor entra como NÚMERO (dá para somar), não como texto
+  ok(sheet.includes("<v>1500</v>"), "aluguel como número 1500");
+  ok(!sheet.includes("R$ 1.500,00"), "valor não vira texto formatado");
+  // data entra como serial com estilo de data
+  ok(sheet.includes(`s="2"><v>${serialData("2026-09-10")}`), "data como serial");
+  // rollup: pai e filha em colunas separadas
+  ok(sheet.includes("<t xml:space=\"preserve\">Alimentação</t>"), "categoria pai");
+  ok(sheet.includes("<t xml:space=\"preserve\">Mercado</t>"), "subcategoria em coluna própria");
+  // uma linha por despesa + cabeçalho
+  eq((sheet.match(/<row /g) || []).length, DESP.length + 1, "linhas = despesas + cabeçalho");
+
+  ok(z["xl/workbook.xml"].includes('name="Despesas"'), "aba nomeada");
+  // texto perigoso não quebra o XML
+  const perigo = despesasParaXLSX(
+    [{ id: "x", spent_on: "2026-09-01", amount_cents: 100, category_id: "c2", description: 'a & b <c> "d"' }],
+    CATS, FORMAS, new Date("2026-09-19T12:00:00Z"));
+  const s2 = abreZip(perigo)["xl/worksheets/sheet1.xml"];
+  ok(s2.includes("a &amp; b &lt;c&gt; &quot;d&quot;"), "escapa &, < > e aspas");
+  // planilha vazia continua válida
+  const vazia = abreZip(despesasParaXLSX([], CATS, FORMAS, new Date("2026-09-19T12:00:00Z")));
+  ok(vazia["xl/worksheets/sheet1.xml"].includes("<t>Valor</t>"), "vazia mantém cabeçalho");
+});
+
 // ---------------------------------------------------------------- resultado
 console.log(`\n${total - falhas}/${total} verificações passaram.`);
 if (falhas) {

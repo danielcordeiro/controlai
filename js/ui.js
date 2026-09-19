@@ -206,6 +206,17 @@ export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
+/** Baixa bytes gerados no cliente (usado na exportação .xlsx). */
+export function downloadBytes(filename, bytes, mime = "application/octet-stream") {
+  const blob = new Blob([bytes], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** Baixa um arquivo texto gerado no cliente (usado na exportação CSV). */
 export function downloadText(filename, text, mime = "text/csv;charset=utf-8") {
   const blob = new Blob(["﻿" + text], { type: mime });

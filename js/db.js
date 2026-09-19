@@ -93,6 +93,10 @@ export const db = {
   exportar: (ledgerId) => rpc("controlai_exportar", { p_ledger: ledgerId }),
   /** Troca o UUID da carteira: a única forma de revogar um link que vazou. */
   rotacionarId: (ledgerId) => rpc("controlai_rotacionar_id", { p_ledger: ledgerId }),
+  /** Token da API para IA (gerado na primeira leitura). Separado do link. */
+  getApiToken: (ledgerId) => rpc("controlai_get_api_token", { p_ledger: ledgerId }),
+  /** Gera um token novo e invalida o anterior (desconecta as IAs). */
+  rotateApiToken: (ledgerId) => rpc("controlai_rotate_api_token", { p_ledger: ledgerId }),
   /** Apaga a carteira e tudo dentro dela. Exige repetir o id como confirmação. */
   apagar: (ledgerId, confirmacao) =>
     rpc("controlai_apagar", { p_ledger: ledgerId, p_confirmacao: confirmacao }),
