@@ -682,7 +682,7 @@ function abrirFormDespesa(despesa) {
     btnSalvar.textContent = "Salvando...";
     try {
       if (editando) {
-        await db.updateDespesa(despesa.id, data.value, cents, catSel, formaSel, descricao.value);
+        await db.updateDespesa(state.ledgerId, despesa.id, data.value, cents, catSel, formaSel, descricao.value);
       } else {
         await db.addDespesa(state.ledgerId, data.value, cents, catSel, formaSel, descricao.value);
         db.track("lancar_despesa", "carteira");
@@ -716,7 +716,7 @@ function abrirFormDespesa(despesa) {
           onClick: async () => {
             if (!confirmAction("Excluir esta despesa?")) return;
             try {
-              await db.delDespesa(despesa.id);
+              await db.delDespesa(state.ledgerId, despesa.id);
               fechar();
               await recarregar();
               toast("Despesa excluída.", "success");
@@ -784,7 +784,7 @@ function itemCategoria(c, filha) {
         onClick: async () => {
           if (!confirmAction(`Excluir a categoria "${c.name}"?`)) return;
           try {
-            await db.delCategoria(c.id);
+            await db.delCategoria(state.ledgerId, c.id);
             await recarregar();
             toast("Categoria excluída.", "success");
           } catch (e) { toast(e.message, "error"); }
@@ -807,7 +807,7 @@ function abrirFormCategoria(c) {
       class: "btn btn--primary btn--lg", text: "Salvar",
       onClick: async () => {
         try {
-          await db.updateCategoria(c.id, nome.value, cor.value, arquivada.checked);
+          await db.updateCategoria(state.ledgerId, c.id, nome.value, cor.value, arquivada.checked);
           close();
           await recarregar();
           toast("Categoria atualizada.", "success");
@@ -873,7 +873,7 @@ function cardFormas() {
             onClick: async () => {
               if (!confirmAction(`Excluir "${f.name}"? As despesas ficam sem forma de pagamento.`)) return;
               try {
-                await db.delForma(f.id);
+                await db.delForma(state.ledgerId, f.id);
                 await recarregar();
                 toast("Forma removida.", "success");
               } catch (e) { toast(e.message, "error"); }
@@ -895,7 +895,7 @@ function abrirFormForma(f) {
       class: "btn btn--primary btn--lg", text: "Salvar",
       onClick: async () => {
         try {
-          await db.updateForma(f.id, nome.value, arquivada.checked);
+          await db.updateForma(state.ledgerId, f.id, nome.value, arquivada.checked);
           close();
           await recarregar();
           toast("Atualizado.", "success");

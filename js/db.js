@@ -85,8 +85,9 @@ export const db = {
       p_payment_method: paymentMethodId || null,
       p_description: description || "",
     }),
-  updateDespesa: (expenseId, spentOn, amountCents, categoryId, paymentMethodId, description) =>
+  updateDespesa: (ledgerId, expenseId, spentOn, amountCents, categoryId, paymentMethodId, description) =>
     rpc("controlai_update_despesa", {
+      p_ledger: ledgerId,
       p_expense: expenseId,
       p_spent_on: spentOn,
       p_amount_cents: amountCents,
@@ -94,20 +95,23 @@ export const db = {
       p_payment_method: paymentMethodId || null,
       p_description: description || "",
     }),
-  delDespesa: (expenseId) => rpc("controlai_del_despesa", { p_expense: expenseId }),
+  delDespesa: (ledgerId, expenseId) =>
+    rpc("controlai_del_despesa", { p_ledger: ledgerId, p_expense: expenseId }),
 
   // ---- plano de contas ------------------------------------------------------
   addCategoria: (ledgerId, name, parentId, color) =>
     rpc("controlai_add_categoria", { p_ledger: ledgerId, p_name: name, p_parent: parentId || null, p_color: color || null }),
-  updateCategoria: (categoryId, name, color, archived) =>
-    rpc("controlai_update_categoria", { p_category: categoryId, p_name: name, p_color: color || null, p_archived: archived ?? null }),
-  delCategoria: (categoryId) => rpc("controlai_del_categoria", { p_category: categoryId }),
+  updateCategoria: (ledgerId, categoryId, name, color, archived) =>
+    rpc("controlai_update_categoria", { p_ledger: ledgerId, p_category: categoryId, p_name: name, p_color: color || null, p_archived: archived ?? null }),
+  delCategoria: (ledgerId, categoryId) =>
+    rpc("controlai_del_categoria", { p_ledger: ledgerId, p_category: categoryId }),
 
   // ---- formas de pagamento --------------------------------------------------
   addForma: (ledgerId, name) => rpc("controlai_add_forma", { p_ledger: ledgerId, p_name: name }),
-  updateForma: (methodId, name, archived) =>
-    rpc("controlai_update_forma", { p_method: methodId, p_name: name, p_archived: archived ?? null }),
-  delForma: (methodId) => rpc("controlai_del_forma", { p_method: methodId }),
+  updateForma: (ledgerId, methodId, name, archived) =>
+    rpc("controlai_update_forma", { p_ledger: ledgerId, p_method: methodId, p_name: name, p_archived: archived ?? null }),
+  delForma: (ledgerId, methodId) =>
+    rpc("controlai_del_forma", { p_ledger: ledgerId, p_method: methodId }),
 
   /** Registra um evento de uso. Fire-and-forget: nunca lança nem bloqueia a UI.
    *  Reaproveita o public.track() já existente no projeto (do Rachaí), com o

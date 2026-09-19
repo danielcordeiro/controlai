@@ -160,6 +160,35 @@ as $$
      and spent_on <  (p_inicio + interval '1 month')::date;
 $$;
 
+-- O objeto é mesmo desta carteira? Usado por TODA mutação: assim o segredo que
+-- vale é o link da carteira, e conhecer o uuid de uma despesa/categoria solta
+-- não permite alterá-la nem apagá-la.
+create or replace function controlai._pertence(p_ledger uuid, p_tabela text, p_id uuid)
+returns void
+language plpgsql
+stable
+set search_path = controlai, public, pg_temp
+as $$
+declare v_ok boolean;
+begin
+  if p_id is null then
+    raise exception 'Registro não informado.';
+  end if;
+  if p_tabela = 'expense' then
+    select exists (select 1 from controlai.expense where id = p_id and ledger_id = p_ledger) into v_ok;
+  elsif p_tabela = 'category' then
+    select exists (select 1 from controlai.category where id = p_id and ledger_id = p_ledger) into v_ok;
+  elsif p_tabela = 'payment_method' then
+    select exists (select 1 from controlai.payment_method where id = p_id and ledger_id = p_ledger) into v_ok;
+  else
+    raise exception 'Tipo de registro inválido.';
+  end if;
+  if not v_ok then
+    raise exception 'Este registro não é desta carteira.';
+  end if;
+end;
+$$;
+
 -- ============================================================================
 -- RPCs públicas (gateway). SECURITY DEFINER => rodam como dono e ignoram a RLS.
 -- ============================================================================
@@ -347,7 +376,7 @@ end;
 $$;
 
 create or replace function public.controlai_update_despesa(
-  p_expense uuid, p_spent_on date, p_amount_cents integer, p_category uuid,
+  p_ledger uuid, p_expense uuid, p_spent_on date, p_amount_cents integer, p_category uuid,
   p_payment_method uuid default null, p_description text default '')
 returns void
 language plpgsql
@@ -356,26 +385,21 @@ set search_path = controlai, public
 as $$
 declare v_ledger uuid;
 begin
-  select ledger_id into v_ledger from controlai.expense where id = p_expense;
-  if v_ledger is null then
-    raise exception 'Despesa não encontrada.';
-  end if;
+  v_ledger := controlai._ledger_ok(p_ledger);
+  perform controlai._pertence(v_ledger, 'expense', p_expense);
   if p_amount_cents is null or p_amount_cents <= 0 then
     raise exception 'O valor precisa ser maior que zero.';
   end if;
   if p_spent_on is null then
     raise exception 'Informe a data da despesa.';
   end if;
-  if not exists (select 1 from controlai.category c
-                  where c.id = p_category and c.ledger_id = v_ledger) then
-    raise exception 'Escolha uma categoria da sua carteira.';
+  if p_spent_on > (now() at time zone 'America/Sao_Paulo')::date + 1 then
+    raise exception 'A data não pode ser no futuro.';
   end if;
-  if p_payment_method is not null
-     and not exists (select 1 from controlai.payment_method m
-                      where m.id = p_payment_method and m.ledger_id = v_ledger) then
-    raise exception 'Forma de pagamento inválida para esta carteira.';
+  perform controlai._pertence(v_ledger, 'category', p_category);
+  if p_payment_method is not null then
+    perform controlai._pertence(v_ledger, 'payment_method', p_payment_method);
   end if;
-
   update controlai.expense
      set spent_on = p_spent_on,
          amount_cents = p_amount_cents,
@@ -383,18 +407,21 @@ begin
          payment_method_id = p_payment_method,
          description = left(coalesce(btrim(p_description), ''), 140),
          updated_at = now()
-   where id = p_expense;
+   where id = p_expense and ledger_id = v_ledger;
 end;
 $$;
 
-create or replace function public.controlai_del_despesa(p_expense uuid)
+create or replace function public.controlai_del_despesa(p_ledger uuid, p_expense uuid)
 returns void
 language plpgsql
 security definer
 set search_path = controlai, public
 as $$
+declare v_ledger uuid;
 begin
-  delete from controlai.expense where id = p_expense;
+  v_ledger := controlai._ledger_ok(p_ledger);
+  perform controlai._pertence(v_ledger, 'expense', p_expense);
+  delete from controlai.expense where id = p_expense and ledger_id = v_ledger;
 end;
 $$;
 
@@ -436,14 +463,16 @@ end;
 $$;
 
 create or replace function public.controlai_update_categoria(
-  p_category uuid, p_name text, p_color text default null, p_archived boolean default null)
+  p_ledger uuid, p_category uuid, p_name text, p_color text default null, p_archived boolean default null)
 returns void
 language plpgsql
 security definer
 set search_path = controlai, public
 as $$
-declare v_nome text;
+declare v_ledger uuid; v_nome text;
 begin
+  v_ledger := controlai._ledger_ok(p_ledger);
+  perform controlai._pertence(v_ledger, 'category', p_category);
   v_nome := btrim(coalesce(p_name, ''));
   if v_nome = '' then
     raise exception 'Dê um nome para a categoria.';
@@ -452,7 +481,7 @@ begin
      set name = left(v_nome, 40),
          color = coalesce(nullif(btrim(p_color), ''), color),
          archived = coalesce(p_archived, archived)
-   where id = p_category;
+   where id = p_category and ledger_id = v_ledger;
 exception when unique_violation then
   raise exception 'Já existe uma categoria com esse nome aqui.';
 end;
@@ -460,20 +489,23 @@ $$;
 
 -- Excluir só quando não há histórico; com histórico, o caminho é arquivar
 -- (some do formulário e continua explicando os meses passados).
-create or replace function public.controlai_del_categoria(p_category uuid)
+create or replace function public.controlai_del_categoria(p_ledger uuid, p_category uuid)
 returns void
 language plpgsql
 security definer
 set search_path = controlai, public
 as $$
+declare v_ledger uuid;
 begin
+  v_ledger := controlai._ledger_ok(p_ledger);
+  perform controlai._pertence(v_ledger, 'category', p_category);
   if exists (select 1 from controlai.expense where category_id = p_category) then
     raise exception 'Esta categoria já tem despesas. Arquive-a em vez de excluir (o histórico continua).';
   end if;
   if exists (select 1 from controlai.category where parent_id = p_category) then
     raise exception 'Esta categoria tem subcategorias. Exclua ou mova as subcategorias antes.';
   end if;
-  delete from controlai.category where id = p_category;
+  delete from controlai.category where id = p_category and ledger_id = v_ledger;
 end;
 $$;
 
@@ -503,14 +535,16 @@ end;
 $$;
 
 create or replace function public.controlai_update_forma(
-  p_method uuid, p_name text, p_archived boolean default null)
+  p_ledger uuid, p_method uuid, p_name text, p_archived boolean default null)
 returns void
 language plpgsql
 security definer
 set search_path = controlai, public
 as $$
-declare v_nome text;
+declare v_ledger uuid; v_nome text;
 begin
+  v_ledger := controlai._ledger_ok(p_ledger);
+  perform controlai._pertence(v_ledger, 'payment_method', p_method);
   v_nome := btrim(coalesce(p_name, ''));
   if v_nome = '' then
     raise exception 'Dê um nome para a forma de pagamento.';
@@ -518,21 +552,24 @@ begin
   update controlai.payment_method
      set name = left(v_nome, 40),
          archived = coalesce(p_archived, archived)
-   where id = p_method;
+   where id = p_method and ledger_id = v_ledger;
 exception when unique_violation then
   raise exception 'Já existe uma forma de pagamento com esse nome.';
 end;
 $$;
 
 -- A forma é opcional na despesa, então excluir apenas desvincula (ON DELETE SET NULL).
-create or replace function public.controlai_del_forma(p_method uuid)
+create or replace function public.controlai_del_forma(p_ledger uuid, p_method uuid)
 returns void
 language plpgsql
 security definer
 set search_path = controlai, public
 as $$
+declare v_ledger uuid;
 begin
-  delete from controlai.payment_method where id = p_method;
+  v_ledger := controlai._ledger_ok(p_ledger);
+  perform controlai._pertence(v_ledger, 'payment_method', p_method);
+  delete from controlai.payment_method where id = p_method and ledger_id = v_ledger;
 end;
 $$;
 
@@ -597,14 +634,14 @@ grant execute on function
   public.controlai_mes(uuid, text),
   public.controlai_meus_ids(),
   public.controlai_add_despesa(uuid, date, integer, uuid, uuid, text),
-  public.controlai_update_despesa(uuid, date, integer, uuid, uuid, text),
-  public.controlai_del_despesa(uuid),
+  public.controlai_update_despesa(uuid, uuid, date, integer, uuid, uuid, text),
+  public.controlai_del_despesa(uuid, uuid),
   public.controlai_add_categoria(uuid, text, uuid, text),
-  public.controlai_update_categoria(uuid, text, text, boolean),
-  public.controlai_del_categoria(uuid),
+  public.controlai_update_categoria(uuid, uuid, text, text, boolean),
+  public.controlai_del_categoria(uuid, uuid),
   public.controlai_add_forma(uuid, text),
-  public.controlai_update_forma(uuid, text, boolean),
-  public.controlai_del_forma(uuid),
+  public.controlai_update_forma(uuid, uuid, text, boolean),
+  public.controlai_del_forma(uuid, uuid),
   public.controlai_renomear(uuid, text),
   public.controlai_set_email(uuid, text),
   public.controlai_exportar(uuid)
@@ -615,3 +652,4 @@ revoke all on function controlai._email_ok(text)          from anon, authenticat
 revoke all on function controlai._mes_inicio(text)        from anon, authenticated, public;
 revoke all on function controlai._ledger_ok(uuid)         from anon, authenticated, public;
 revoke all on function controlai._total_mes(uuid, date)   from anon, authenticated, public;
+revoke all on function controlai._pertence(uuid, text, uuid) from anon, authenticated, public;
