@@ -282,6 +282,12 @@ async function renderRecuperar() {
   let sessao = null;
   try { sessao = await auth.sessao(); } catch { sessao = null; }
 
+  // A flag se consome AQUI, antes do retorno antecipado: se ela só baixasse no
+  // caminho sem sessão, quem recuperasse e depois saísse veria "link expirado"
+  // no acesso seguinte, sem link nenhum ter expirado.
+  const veio = veioDoEmail;
+  veioDoEmail = false;
+
   if (sessao) return renderMinhasCarteiras(sessao.user?.email || "");
 
   // Sem sessão: pede o e-mail.
@@ -314,10 +320,7 @@ async function renderRecuperar() {
     btn,
     el("a", { class: "btn btn--ghost btn--block", href: "#/", text: "Voltar" }),
   );
-  if (veioDoEmail) {
-    toast(ERRO_DO_EMAIL || "Link expirado ou já usado. Peça um novo.", "error");
-    veioDoEmail = false; // a informação se consome: não repetir no próximo acesso
-  }
+  if (veio) toast(ERRO_DO_EMAIL || "Link expirado ou já usado. Peça um novo.", "error");
 }
 
 function renderConfirmarCodigo(email) {
