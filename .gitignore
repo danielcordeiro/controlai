@@ -1,0 +1,6 @@
+# dependências locais (o app não usa build, mas por garantia)
+node_modules/
+# logs e temporários
+*.log
+.DS_Store
+Thumbs.db

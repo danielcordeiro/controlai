@@ -1,0 +1,11 @@
+{
+  "name": "controlai",
+  "version": "1.0.0",
+  "description": "Controlaí — controle de despesas pessoais: quanto você gastou no mês, por categoria.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/unit.mjs"
+  },
+  "license": "MIT"
+}
