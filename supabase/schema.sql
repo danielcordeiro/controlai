@@ -101,6 +101,7 @@ create or replace function controlai._email_ok(p_email text)
 returns text
 language plpgsql
 immutable
+set search_path = controlai, public, pg_temp
 as $$
 declare v text;
 begin
@@ -117,6 +118,7 @@ create or replace function controlai._mes_inicio(p_mes text)
 returns date
 language plpgsql
 stable            -- usa now() quando o mês vem vazio, então NÃO é immutable
+set search_path = controlai, public, pg_temp
 as $$
 begin
   if coalesce(btrim(p_mes), '') = '' then
@@ -134,6 +136,7 @@ create or replace function controlai._ledger_ok(p_ledger uuid)
 returns uuid
 language plpgsql
 stable
+set search_path = controlai, public, pg_temp
 as $$
 begin
   if p_ledger is null or not exists (select 1 from controlai.ledger where id = p_ledger) then
@@ -148,6 +151,7 @@ create or replace function controlai._total_mes(p_ledger uuid, p_inicio date)
 returns bigint
 language sql
 stable
+set search_path = controlai, public, pg_temp
 as $$
   select coalesce(sum(amount_cents), 0)::bigint
     from controlai.expense

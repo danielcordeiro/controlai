@@ -136,7 +136,13 @@ grupo("porCategoria (rollup pai/filho)", () => {
   eq(alim.subs.reduce((s, x) => s + x.cents, 0), alim.cents, "subs somam o pai");
   eq(alim.subs[0].cents, 20000, "sub ordenada por valor (Mercado primeiro)");
   const transp = linhas.find((l) => l.id === "c2");
-  eq(transp.subs.length, 0, "categoria sem filhos não tem detalhamento");
+  eq(transp.subs.length, 0, "categoria folha não repete a si mesma no detalhamento");
+  // pai cujo gasto veio SÓ de uma subcategoria precisa revelar qual
+  const soSub = porCategoria(
+    [{ id: "s1", spent_on: "2026-09-02", amount_cents: 7000, category_id: "c1b" }], CATS);
+  eq(soSub[0].id, "c1", "rollup no pai");
+  eq(soSub[0].subs.length, 1, "revela a subcategoria única");
+  eq(soSub[0].subs[0].name, "Restaurante", "nome da subcategoria");
   // percentuais
   ok(Math.abs(linhas.reduce((s, l) => s + l.pct, 0) - 100) < 0.01, "percentuais somam 100");
   eq(porCategoria([], CATS).length, 0, "mês sem despesa");

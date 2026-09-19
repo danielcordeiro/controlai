@@ -68,11 +68,14 @@ export function porCategoria(despesas, categorias) {
 
   return [...grupos.values()]
     .map((g) => {
-      const subs = g.origens.size > 1
-        ? [...g.origens.values()]
-            .map((o) => ({ ...o, pct: pctDe(o.cents, g.cents) }))
-            .sort(porValorDepoisNome)
-        : [];
+      // Detalha quando o valor vem de mais de uma origem OU quando a única
+      // origem é uma subcategoria (senão a linha "Alimentação" esconderia que
+      // tudo foi em "Restaurante"). Categoria folha não repete a si mesma.
+      const origens = [...g.origens.values()];
+      const soOPai = origens.length === 1 && origens[0].id === g.cat.id;
+      const subs = soOPai
+        ? []
+        : origens.map((o) => ({ ...o, pct: pctDe(o.cents, g.cents) })).sort(porValorDepoisNome);
       return {
         id: g.cat.id,
         name: g.cat.name,
