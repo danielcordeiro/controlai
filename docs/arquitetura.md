@@ -26,9 +26,11 @@ Decisão:
 |---|---|---|
 | Tabelas | schema **`controlai`** | fora do `public`, sem risco de colisão; o PostgREST **não expõe** esse schema, então a API sequer enxerga as tabelas |
 | Funções RPC | `public.controlai_*` | o PostgREST só chama funções em schema exposto; o prefixo evita ambiguidade com as do Rachaí |
-| Analytics | `public.track()` do Rachaí | não vale uma tabela nova; os eventos vão prefixados (`controlai:pageview`) e o relatório existente separa por nome |
+| Analytics | `public.track()` do Rachaí | não vale uma tabela nova; os eventos vão prefixados (`controlai:pageview`) e os relatórios foram separados: `analytics_summary()` exclui `controlai:%` e `controlai_analytics_summary()` só olha para eles |
 
-Nada do Rachaí foi alterado — nem tabela, nem função, nem permissão.
+Nada de dado do Rachaí foi alterado. A única função dele que mudou foi
+`analytics_summary()`, que passou a **excluir** os eventos do Controlaí — sem
+isso os totais dos dois apps somavam e inflavam o relatório do Rachaí.
 
 ---
 
@@ -154,13 +156,13 @@ barras, lista, comparação) é desenhada de um JSON só, sem N+1 de rede.
 ```
 js/ui.js       DOM, dinheiro em centavos (parse pt-BR/en-US), datas e meses, toast, CSV download
 js/report.js   agregações PURAS: por categoria (com rollup pai/filho), por forma,
-               por dia, maiores despesas, série diária, CSV
+               por dia, maiores despesas, CSV
 js/db.js       wrapper das RPCs + fluxo de Auth da recuperação
 js/app.js      rotas (#/ · #/c/<uuid> · #/recuperar), telas e formulários
 ```
 
 `report.js` e os helpers de `ui.js` são puros e cobertos por `tests/unit.mjs`
-(**108 verificações**): conversão de valor, aritmética de meses (virada de ano,
+(**127 verificações**): conversão de valor, aritmética de meses (virada de ano,
 bissexto), rollup de subcategoria, despesa órfã que não some do total, ida e
 volta de formatação.
 
