@@ -15,7 +15,10 @@
 -- public.expenses, public.payments, add_expense(), get_event() etc. Por isso as
 -- tabelas ficam fora do public e toda função leva o prefixo controlai_.
 -- O analytics é reaproveitado: usamos o public.track() do Rachaí com nomes de
--- evento prefixados ("controlai:pageview"), sem criar tabela nova.
+-- evento prefixados ("controlai:pageview"), sem criar tabela nova. Os relatórios
+-- ficam separados: public.analytics_summary() EXCLUI os eventos "controlai:%" e
+-- public.controlai_analytics_summary() olha só para eles (ambos service_role).
+-- Ver supabase/analytics.sql.
 -- ============================================================================
 
 create extension if not exists "pgcrypto";
@@ -95,6 +98,20 @@ create table if not exists controlai.expense (
 -- índice que serve a consulta quente: despesas de UM mês de UMA carteira
 create index if not exists expense_ledger_data_idx on controlai.expense (ledger_id, spent_on desc);
 create index if not exists expense_category_idx    on controlai.expense (category_id);
+
+-- Migração idempotente das FKs: `create table if not exists` não altera nada num
+-- banco que já tem as tabelas, e o `on update cascade` é o que faz a rotação de
+-- id (controlai_rotacionar_id) levar despesas e categorias junto.
+do $$
+declare t text;
+begin
+  foreach t in array array['category', 'payment_method', 'expense', 'ledger_email'] loop
+    execute format('alter table controlai.%I drop constraint if exists %I', t, t || '_ledger_id_fkey');
+    execute format(
+      'alter table controlai.%I add constraint %I foreign key (ledger_id)
+         references controlai.ledger(id) on update cascade on delete cascade', t, t || '_ledger_id_fkey');
+  end loop;
+end $$;
 
 -- ----------------------------------------------------------------------------
 -- RLS ligada, sem policy pública: nada é legível/gravável direto pela anon key.

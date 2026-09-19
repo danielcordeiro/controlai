@@ -122,19 +122,35 @@ Não há build: é HTML + CSS + ES modules servidos estaticamente.
 
 ## ☁️ Supabase
 
-1. Rode `supabase/schema.sql` inteiro no **SQL Editor** (é idempotente).
-2. Em **Authentication → URL Configuration**, inclua a URL do app em
-   **Redirect URLs** (ex.: `https://danielcordeiro.github.io/controlai/**`).
-   Sem isso o link mágico da recuperação volta para a Site URL do projeto.
-3. (Opcional) Para o app aceitar **código de 6 dígitos** além do link, edite o
-   template **Magic Link** em *Authentication → Email Templates* incluindo
-   `{{ .Token }}`. O app aceita os dois caminhos.
-4. (Opcional) Com o SMTP padrão do Supabase o envio é **limitado a poucos e-mails
-   por hora**. Para uso real, configure um SMTP próprio em *Project Settings → Auth*.
+### Já está pronto (instância do Daniel, projeto `wkuykhomucxskelbcpmi`)
+- `supabase/schema.sql` e `supabase/analytics.sql` **já aplicados**: tabelas,
+  RPCs e permissões estão no ar e testados.
+- O app na URL acima já cria carteira, lança despesa e fecha o mês.
 
-O projeto compartilha a instância com o Rachaí: nada de `public` foi alterado, e o
-analytics reaproveita a função `public.track()` já existente, com os eventos
-prefixados (`controlai:pageview`).
+### Falta você fazer (2 minutos no painel) — só a recuperação depende disso
+1. **Authentication → URL Configuration → Redirect URLs**: adicionar
+   `https://danielcordeiro.github.io/controlai/**`.
+   Sem isso o link mágico volta para a *Site URL* do projeto e a recuperação de
+   ID não fecha. **Tudo o mais funciona sem esse passo.**
+2. Depois, teste de ponta a ponta: crie uma carteira, toque em *Testar a
+   recuperação*, abra o e-mail e confira se volta autenticado.
+
+### Opcional
+- **Código de 6 dígitos** além do link: incluir `{{ .Token }}` no template
+  *Magic Link* em *Authentication → Email Templates*. O app aceita os dois.
+- **SMTP próprio** em *Project Settings → Auth*: o serviço embutido do Supabase
+  é limitado a poucos e-mails por hora e não é recomendado para produção.
+
+### Convivência com o Rachaí
+Mesma instância, zero alteração no que é dele: as tabelas do Controlaí ficam no
+schema `controlai` e as funções levam prefixo. O analytics reaproveita o
+`public.track()` existente com eventos `controlai:*`, e os relatórios foram
+separados — `analytics_summary()` voltou a contar só o Rachaí e
+`controlai_analytics_summary()` conta só este app.
+
+### Se for clonar em outro projeto Supabase
+Rode `supabase/schema.sql` inteiro (idempotente) e depois `supabase/analytics.sql`,
+e preencha o `config.js` a partir do `config.example.js`.
 
 ---
 

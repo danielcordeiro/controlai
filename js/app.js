@@ -472,6 +472,26 @@ function abrirBoasVindas() {
       "Perdeu o link? Dá para recuperar pelo e-mail ", el("b", { text: s.ledger.email }),
       " em “Recuperar meu ID”. Você pode trocar o e-mail depois, em Ajustes.",
     ]),
+    // Confirma que a recuperação funciona de verdade ANTES de a pessoa precisar
+    // dela: se o e-mail estiver errado ou não chegar, ela descobre agora.
+    el("button", {
+      class: "btn btn--ghost btn--block", type: "button",
+      text: "Testar a recuperação (envia um e-mail)",
+      onClick: async (ev) => {
+        const b = ev.currentTarget;
+        b.disabled = true;
+        b.textContent = "Enviando...";
+        try {
+          await auth.enviarLink(s.ledger.email);
+          b.textContent = "E-mail enviado ✓";
+          toast(`Mandamos um link para ${s.ledger.email}. Se chegar, sua recuperação está funcionando.`, "success");
+        } catch (err) {
+          b.disabled = false;
+          b.textContent = "Testar a recuperação (envia um e-mail)";
+          toast(err.message, "error");
+        }
+      },
+    }),
   ]);
 
   const { close } = openModal(
@@ -748,7 +768,7 @@ function abrirFormDespesa(despesa) {
       ]));
     }
     chipsCat.append(el("button", { class: "chip chip--add", type: "button", text: "＋ nova",
-      onClick: () => { fechar(); state.tab = "plano"; render(); toast("Cadastre a categoria e lance a despesa em seguida."); } }));
+      onClick: () => criarCategoriaNoFormulario() }));
   }
 
   function desenhaSubs() {
@@ -776,6 +796,36 @@ function abrirFormDespesa(despesa) {
         "aria-pressed": formaSel === f.id ? "true" : "false",
         onClick: () => { formaSel = f.id; desenhaFormas(); } }));
     }
+  }
+
+  /** Cria a categoria numa folha POR CIMA do formulário e já a seleciona —
+   *  fechar o formulário jogaria fora valor, data e descrição já digitados. */
+  function criarCategoriaNoFormulario() {
+    const nome = el("input", { class: "input", placeholder: "Ex.: Pet, Viagem, Presentes", maxlength: "40" });
+    const salvarCat = async () => {
+      const texto = nome.value.trim();
+      if (!texto) { toast("Dê um nome para a categoria.", "error"); nome.focus(); return; }
+      try {
+        const cor = corDisponivel(cats);
+        const novoId = await db.addCategoria(state.ledgerId, texto, null, cor);
+        const nova = { id: novoId, name: texto, color: cor, parent_id: null, archived: false };
+        cats.push(nova);
+        pais.push(nova);
+        paiSel = novoId;
+        catSel = novoId;
+        fecharCat();
+        desenhaCategorias();
+        desenhaSubs();
+        toast(`Categoria "${texto}" criada e escolhida.`, "success");
+        recarregar();   // sincroniza o resto da tela em segundo plano
+      } catch (e) { toast(e.message, "error"); }
+    };
+    nome.addEventListener("keydown", (ev) => { if (ev.key === "Enter") salvarCat(); });
+    const { close: fecharCat } = openModal(
+      "Nova categoria",
+      el("div", {}, [campo("Nome da categoria", nome)]),
+      el("button", { class: "btn btn--primary btn--lg", type: "button", text: "Criar e usar", onClick: salvarCat })
+    );
   }
 
   desenhaCategorias();
