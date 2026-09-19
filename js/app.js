@@ -3,7 +3,7 @@
 import { db, auth, isConfigured, chegouDoEmail, erroDoEmail } from "./db.js";
 import {
   el, clear, fmtBRL, fmtBRLCurto, parseAmountToCents, toast, confirmAction, copyText,
-  hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct, downloadText,
+  hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct, downloadText, MAX_CENTAVOS,
 } from "./ui.js";
 import {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
@@ -16,6 +16,8 @@ const state = {
   mes: mesDe(hojeISO()),
   snapshot: null,
   loading: false,
+  trocandoMes: false,
+  novaCarteira: null,   // id da carteira recém-criada: mostra o link uma vez
   erro: null,
   tab: "mes", // mes | despesas | plano | ajustes
 };
@@ -137,7 +139,9 @@ async function recarregar(mes = state.mes) {
 }
 
 function irParaMes(novoMes) {
-  recarregar(novoMes);
+  state.trocandoMes = true;
+  render();
+  recarregar(novoMes).finally(() => { state.trocandoMes = false; render(); });
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +222,7 @@ function renderHome() {
       const res = await db.criar(n, e);
       lembrarCarteira(res.id, res.name);
       db.track("criar_carteira", "home");
+      state.novaCarteira = res.id;   // a próxima tela entrega o link
       location.hash = `#/c/${res.id}`;
     } catch (err) {
       toast(err.message, "error");
@@ -408,11 +413,16 @@ function renderCarteira() {
     : state.tab === "ajustes" ? abaAjustes()
     : abaMes();
 
+  if (state.novaCarteira && state.novaCarteira === state.ledgerId) {
+    state.novaCarteira = null;
+    setTimeout(() => abrirBoasVindas(), 120);
+  }
+
   shell(
     header(s.ledger.name),
     el("main", { class: "wrap" }, [
       navegadorMes(),
-      el("div", { class: "tabs" }, [
+      el("div", { class: "tabs", role: "tablist", "aria-label": "Seções da carteira" }, [
         tabBtn("mes", "Mês"),
         tabBtn("despesas", "Despesas"),
         tabBtn("plano", "Categorias"),
@@ -424,10 +434,61 @@ function renderCarteira() {
   );
 }
 
+/**
+ * Entrega o link logo depois de criar a carteira. Sem isto, a única cópia do id
+ * ficava no localStorage: trocar de aparelho ou limpar o navegador perdia tudo,
+ * e a pessoa nunca tinha visto um link para guardar.
+ */
+function abrirBoasVindas() {
+  const s = state.snapshot;
+  if (!s) return;
+  const link = `${location.origin}${location.pathname}#/c/${s.ledger.id}`;
+
+  const corpo = el("div", {}, [
+    el("p", { style: "margin:4px 0 0" }, [
+      "Tudo pronto. ", el("b", { text: "Este link é a chave da sua carteira" }),
+      " — quem tiver ele entra. Guarde agora: salve nos favoritos ou mande para você mesmo.",
+    ]),
+    el("div", { class: "idbox" }, [el("code", { text: link })]),
+    el("div", { class: "row2" }, [
+      el("button", {
+        class: "btn btn--primary", type: "button", text: "Copiar link",
+        onClick: async () => toast((await copyText(link)) ? "Link copiado." : "Não consegui copiar.", "success"),
+      }),
+      navigator.share
+        ? el("button", {
+            class: "btn btn--ghost", type: "button", text: "Compartilhar",
+            onClick: async () => {
+              try { await navigator.share({ title: "Controlaí", text: "Minha carteira no Controlaí", url: link }); }
+              catch { /* usuário cancelou */ }
+            },
+          })
+        : el("button", {
+            class: "btn btn--ghost", type: "button", text: "Copiar só o ID",
+            onClick: async () => toast((await copyText(s.ledger.id)) ? "ID copiado." : "Não consegui copiar.", "success"),
+          }),
+    ]),
+    el("p", { class: "small muted", style: "margin:14px 0 0" }, [
+      "Perdeu o link? Dá para recuperar pelo e-mail ", el("b", { text: s.ledger.email }),
+      " em “Recuperar meu ID”. Você pode trocar o e-mail depois, em Ajustes.",
+    ]),
+  ]);
+
+  const { close } = openModal(
+    "Carteira criada 🎉",
+    corpo,
+    el("button", { class: "btn btn--primary btn--lg", type: "button", text: "Já guardei, quero lançar", onClick: () => close() })
+  );
+}
+
 function tabBtn(key, label) {
+  const ativa = state.tab === key;
   return el("button", {
-    class: `tab ${state.tab === key ? "tab--active" : ""}`,
+    class: `tab ${ativa ? "tab--active" : ""}`,
     text: label,
+    type: "button",
+    role: "tab",
+    "aria-selected": ativa ? "true" : "false",
     onClick: () => { state.tab = key; render(); },
   });
 }
@@ -436,17 +497,21 @@ function navegadorMes() {
   const s = state.snapshot;
   const mesAtual = mesDe(hojeISO());
   const proximo = mesAdd(state.mes, 1);
-  return el("div", { class: "monthnav" }, [
-    el("button", { class: "monthnav__btn", text: "‹", "aria-label": "Mês anterior", onClick: () => irParaMes(mesAdd(state.mes, -1)) }),
+  return el("div", { class: `monthnav ${state.trocandoMes ? "monthnav--carregando" : ""}` }, [
+    el("button", {
+      class: "monthnav__btn", text: "‹", "aria-label": "Mês anterior",
+      disabled: state.trocandoMes,
+      onClick: () => irParaMes(mesAdd(state.mes, -1)),
+    }),
     el("div", { class: "monthnav__mid", onClick: () => irParaMes(mesAtual) }, [
       el("div", { class: "monthnav__label", text: mesExtenso(state.mes) }),
-      el("div", { class: "monthnav__total", text: state.mes === mesAtual ? "mês atual" : "toque para voltar ao mês atual" }),
+      el("div", { class: "monthnav__total", text: state.trocandoMes ? "carregando..." : (state.mes === mesAtual ? "mês atual" : "toque para voltar ao mês atual") }),
     ]),
     el("button", {
       class: "monthnav__btn",
       text: "›",
       "aria-label": "Próximo mês",
-      disabled: proximo > mesAtual,
+      disabled: state.trocandoMes || proximo > mesAtual,
       onClick: () => irParaMes(proximo),
     }),
   ]);
@@ -476,7 +541,9 @@ function abaMes() {
   const hoje = hojeISO();
   const diaAtual = mesDe(hoje) === state.mes ? Number(hoje.slice(8, 10)) : dias;
   const mediaDia = diaAtual > 0 ? Math.round(total / diaAtual) : 0;
-  const projecao = mesDe(hoje) === state.mes ? mediaDia * dias : null;
+  // Projetar o mês inteiro a partir de 2 ou 3 dias transforma o aluguel do dia 1
+  // num número absurdo. Só a partir de uma semana a média começa a significar algo.
+  const projecao = mesDe(hoje) === state.mes && diaAtual >= 7 ? mediaDia * dias : null;
 
   return el("div", {}, [
     cardTotal(total, anterior),
@@ -499,7 +566,7 @@ function abaMes() {
           el("div", { style: "display:flex;gap:8px;padding:6px 0;font-size:14px" }, [
             el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", text: f.name }),
             el("b", { text: fmtBRL(f.cents) }),
-            el("span", { class: "muted small", style: "width:44px;text-align:right", text: `${f.pct.toFixed(0)}%` }),
+            el("span", { class: "muted small", style: "width:44px;text-align:right", text: `${f.pctExib}%` }),
           ])
         ))
       : null,
@@ -571,7 +638,7 @@ function donutCard(cats, total) {
     el("li", { class: "legend__item" }, [
       el("span", { class: "legend__dot", style: `background:${c.color}` }),
       el("span", { class: "legend__name", text: c.name }),
-      el("span", { class: "legend__val", text: `${fmtBRL(c.cents)} · ${c.pct.toFixed(0)}%` }),
+      el("span", { class: "legend__val", text: `${fmtBRL(c.cents)} · ${c.pctExib}%` }),
     ])
   ));
 
@@ -590,7 +657,7 @@ function linhaCategoria(c, maiorValor) {
       el("div", { class: "catrow__fill", style: `width:${largura.toFixed(1)}%;background:${c.color}` }),
     ]),
     el("div", { class: "catrow__meta" }, [
-      el("span", { text: `${c.pct.toFixed(1).replace(".", ",")}% do mês` }),
+      el("span", { text: `${c.pctExib}% do mês` }),
       el("span", { text: `${c.count} lançamento${c.count === 1 ? "" : "s"}` }),
     ]),
     c.subs.length
@@ -628,16 +695,19 @@ function abaDespesas() {
         const pai = cat?.parent_id ? cats.get(cat.parent_id) : null;
         const nomeCat = cat ? (pai ? `${pai.name} › ${cat.name}` : cat.name) : "Sem categoria";
         const forma = d.payment_method_id ? formas.get(d.payment_method_id)?.name : null;
-        return el("div", { class: "exp" }, [
+        // a linha INTEIRA é o alvo: no celular ninguém acerta um texto de 4 letras
+        return el("button", {
+          class: "exp", type: "button",
+          "aria-label": `Editar ${d.description || nomeCat}, ${fmtBRL(d.amount_cents)}`,
+          onClick: () => abrirFormDespesa(d),
+        }, [
           el("span", { class: "exp__dot", style: `background:${(pai || cat)?.color || "#9ca3af"}` }),
-          el("div", { class: "exp__main", onClick: () => abrirFormDespesa(d) }, [
+          el("div", { class: "exp__main" }, [
             el("div", { class: "exp__desc", text: d.description || nomeCat }),
             el("div", { class: "exp__meta", text: d.description ? `${nomeCat}${forma ? ` · ${forma}` : ""}` : (forma || "sem forma de pagamento") }),
           ]),
-          el("div", { class: "exp__right" }, [
-            el("span", { class: "exp__amount", text: fmtBRL(d.amount_cents) }),
-            el("button", { class: "iconbtn", text: "✏️", title: "Editar", onClick: () => abrirFormDespesa(d) }),
-          ]),
+          el("span", { class: "exp__amount", text: fmtBRL(d.amount_cents) }),
+          el("span", { class: "exp__chevron", "aria-hidden": "true", text: "›" }),
         ]);
       }),
     ])
@@ -671,6 +741,7 @@ function abrirFormDespesa(despesa) {
     for (const c of pais) {
       const on = paiSel === c.id;
       chipsCat.append(el("button", { class: `chip ${on ? "chip--on" : ""}`, type: "button",
+        "aria-pressed": on ? "true" : "false",
         onClick: () => { paiSel = c.id; catSel = c.id; desenhaCategorias(); desenhaSubs(); } }, [
         el("span", { class: "chip__dot", style: `background:${c.color}` }),
         c.name,
@@ -686,9 +757,11 @@ function abrirFormDespesa(despesa) {
     if (!paiSel || !filhas.length) { chipsSub.style.display = "none"; return; }
     chipsSub.style.display = "";
     chipsSub.append(el("button", { class: `chip ${catSel === paiSel ? "chip--on" : ""}`, type: "button", text: "geral",
+      "aria-pressed": catSel === paiSel ? "true" : "false",
       onClick: () => { catSel = paiSel; desenhaSubs(); } }));
     for (const f of filhas) {
       chipsSub.append(el("button", { class: `chip ${catSel === f.id ? "chip--on" : ""}`, type: "button", text: f.name,
+        "aria-pressed": catSel === f.id ? "true" : "false",
         onClick: () => { catSel = f.id; desenhaSubs(); } }));
     }
   }
@@ -696,9 +769,11 @@ function abrirFormDespesa(despesa) {
   function desenhaFormas() {
     clear(chipsForma);
     chipsForma.append(el("button", { class: `chip ${!formaSel ? "chip--on" : ""}`, type: "button", text: "não informar",
+      "aria-pressed": !formaSel ? "true" : "false",
       onClick: () => { formaSel = null; desenhaFormas(); } }));
     for (const f of formas) {
       chipsForma.append(el("button", { class: `chip ${formaSel === f.id ? "chip--on" : ""}`, type: "button", text: f.name,
+        "aria-pressed": formaSel === f.id ? "true" : "false",
         onClick: () => { formaSel = f.id; desenhaFormas(); } }));
     }
   }
@@ -712,6 +787,11 @@ function abrirFormDespesa(despesa) {
   const salvar = async () => {
     const cents = parseAmountToCents(valor.value);
     if (!cents) { toast("Informe um valor maior que zero.", "error"); valor.focus(); return; }
+    if (cents > MAX_CENTAVOS) {
+      toast("Esse valor é grande demais. Confira os zeros.", "error");
+      valor.focus();
+      return;
+    }
     if (!catSel) { toast("Escolha uma categoria.", "error"); return; }
     if (!data.value) { toast("Informe a data.", "error"); return; }
     btnSalvar.disabled = true;
@@ -737,15 +817,15 @@ function abrirFormDespesa(despesa) {
   valor.addEventListener("keydown", (ev) => { if (ev.key === "Enter") salvar(); });
 
   const corpo = el("div", {}, [
-    el("label", { class: "label", text: "Valor" }), valor,
-    el("label", { class: "label", text: "Data" }), data,
+    campo("Valor", valor),
     el("label", { class: "label", text: "Categoria" }), chipsCat, chipsSub,
+    campo("Data", data),
     el("label", { class: "label", text: "Forma de pagamento (opcional)" }), chipsForma,
-    el("label", { class: "label", text: "Descrição (opcional)" }), descricao,
-    btnSalvar,
+    campo("Descrição (opcional)", descricao),
     editando
       ? el("button", {
           class: "btn btn--danger btn--block",
+          type: "button",
           text: "Excluir despesa",
           onClick: async () => {
             if (!confirmAction("Excluir esta despesa?")) return;
@@ -760,9 +840,10 @@ function abrirFormDespesa(despesa) {
       : null,
   ]);
 
-  const { close } = openModal(editando ? "Editar despesa" : "Nova despesa", corpo);
+  // botão no rodapé grudado: no celular ele ficaria ~600px abaixo do valor
+  const { close } = openModal(editando ? "Editar despesa" : "Nova despesa", corpo, btnSalvar);
   const fechar = close;
-  setTimeout(() => valor.focus(), 60);
+  setTimeout(() => valor.focus(), 80);
 }
 
 // ---- aba CATEGORIAS (plano de contas) --------------------------------------
@@ -1058,21 +1139,65 @@ function corDisponivel(cats) {
   return PALETA.find((c) => !usadas.has(c)) || PALETA[(cats?.length || 0) % PALETA.length];
 }
 
-function openModal(title, contentNode) {
+let seqId = 0;
+/** Campo com rótulo REALMENTE associado (for/id) — leitor de tela anuncia o nome. */
+function campo(rotulo, input, dica) {
+  const id = `ladfb-c${++seqId}`;
+  input.id = id;
+  return el("div", {}, [
+    el("label", { class: "label", for: id, text: rotulo }),
+    dica ? el("div", { class: "small muted", style: "margin:-2px 0 6px", text: dica }) : null,
+    input,
+  ]);
+}
+
+/**
+ * Folha inferior acessível: role=dialog, fecha no ✕/backdrop/Esc, devolve o foco
+ * para quem abriu e prende o Tab dentro dela. `rodape` fica grudado embaixo, para
+ * o botão principal não ficar 600px abaixo do primeiro campo no celular.
+ */
+function openModal(title, contentNode, rodape) {
+  const antes = document.activeElement;
   const overlay = el("div", { class: "overlay" });
-  const close = () => { overlay.classList.remove("overlay--show"); setTimeout(() => overlay.remove(), 200); };
-  const sheet = el("div", { class: "sheet" }, [
+  const tituloId = `ladfb-t${++seqId}`;
+  let fechado = false;
+  const close = () => {
+    if (fechado) return;
+    fechado = true;
+    document.removeEventListener("keydown", onKey, true);
+    overlay.classList.remove("overlay--show");
+    setTimeout(() => overlay.remove(), 200);
+    try { antes && antes.focus && antes.focus(); } catch { /* ignora */ }
+  };
+  const focaveis = () => sheet.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])');
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); close(); return; }
+    if (e.key !== "Tab") return;
+    const f = focaveis();
+    if (!f.length) return;
+    const primeiro = f[0], ultimo = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === primeiro) { e.preventDefault(); ultimo.focus(); }
+    else if (!e.shiftKey && document.activeElement === ultimo) { e.preventDefault(); primeiro.focus(); }
+  };
+  const sheet = el("div", {
+    class: "sheet", role: "dialog", "aria-modal": "true", "aria-labelledby": tituloId,
+  }, [
     el("div", { class: "sheet__head" }, [
-      el("h2", { class: "sheet__title", text: title }),
-      el("button", { class: "iconbtn", text: "✕", "aria-label": "Fechar", onClick: close }),
+      el("h2", { class: "sheet__title", id: tituloId, text: title }),
+      el("button", { class: "iconbtn", type: "button", text: "✕", "aria-label": "Fechar", onClick: close }),
     ]),
     el("div", { class: "sheet__body" }, [contentNode]),
+    rodape ? el("div", { class: "sheet__foot" }, [rodape]) : null,
   ]);
   overlay.append(sheet);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  document.addEventListener("keydown", onKey, true);
   document.body.append(overlay);
   void overlay.offsetWidth;
   overlay.classList.add("overlay--show");
+  const f = focaveis();
+  setTimeout(() => { try { (f[1] || f[0])?.focus(); } catch { /* ignora */ } }, 60);
   return { close };
 }
 

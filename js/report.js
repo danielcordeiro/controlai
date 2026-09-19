@@ -14,6 +14,29 @@ function pctDe(cents, total) {
   return total > 0 ? (cents * 100) / total : 0;
 }
 
+/**
+ * Percentual INTEIRO para exibir, pelo método do maior resto: a soma das linhas
+ * fecha exatamente 100. Arredondar cada linha isolada faria "100% + 1% = 101%".
+ * Grava `pctExib` em cada linha (mutação local, as linhas acabaram de ser criadas).
+ */
+function distribuiPctExib(linhas, total) {
+  if (!linhas.length || total <= 0) {
+    linhas.forEach((l) => { l.pctExib = 0; });
+    return linhas;
+  }
+  const brutos = linhas.map((l) => (l.cents * 100) / total);
+  const baixo = brutos.map(Math.floor);
+  let resto = 100 - baixo.reduce((a, b) => a + b, 0);
+  // quem tem a maior parte fracionária leva os pontos que sobraram
+  const ordem = brutos
+    .map((b, i) => ({ i, frac: b - Math.floor(b) }))
+    .sort((a, b) => b.frac - a.frac || a.i - b.i);
+  const extra = new Array(linhas.length).fill(0);
+  for (let k = 0; k < ordem.length && resto > 0; k++, resto--) extra[ordem[k].i] = 1;
+  linhas.forEach((l, i) => { l.pctExib = baixo[i] + extra[i]; });
+  return linhas;
+}
+
 /** Ordena por valor decrescente e, no empate, por nome (resultado estável). */
 function porValorDepoisNome(a, b) {
   if (b.cents !== a.cents) return b.cents - a.cents;
@@ -66,7 +89,7 @@ export function porCategoria(despesas, categorias) {
 
   const total = totalCentavos(despesas);
 
-  return [...grupos.values()]
+  return distribuiPctExib([...grupos.values()]
     .map((g) => {
       // Detalha quando o valor vem de mais de uma origem OU quando a única
       // origem é uma subcategoria (senão a linha "Alimentação" esconderia que
@@ -86,7 +109,7 @@ export function porCategoria(despesas, categorias) {
         subs,
       };
     })
-    .sort(porValorDepoisNome);
+    .sort(porValorDepoisNome), total);
 }
 
 /**
@@ -109,9 +132,10 @@ export function porFormaPagamento(despesas, formas) {
   }
 
   const total = totalCentavos(despesas);
-  return [...grupos.values()]
-    .map((g) => ({ ...g, pct: pctDe(g.cents, total) }))
-    .sort(porValorDepoisNome);
+  return distribuiPctExib(
+    [...grupos.values()].map((g) => ({ ...g, pct: pctDe(g.cents, total) })).sort(porValorDepoisNome),
+    total
+  );
 }
 
 /**
@@ -138,26 +162,6 @@ export function maioresDespesas(despesas, n = 5) {
   return [...(despesas || [])]
     .sort((a, b) => (b.amount_cents || 0) - (a.amount_cents || 0))
     .slice(0, Math.max(0, n));
-}
-
-/**
- * Série diária acumulada do mês — para a linha "ritmo de gasto".
- * Devolve: [{ dia: 1..N, cents, acumulado }] cobrindo todos os dias do mês.
- */
-export function serieDiaria(despesas, dias) {
-  const porDiaNum = new Map();
-  for (const d of despesas || []) {
-    const num = Number(String(d.spent_on).slice(8, 10));
-    porDiaNum.set(num, (porDiaNum.get(num) || 0) + (d.amount_cents || 0));
-  }
-  const out = [];
-  let acc = 0;
-  for (let i = 1; i <= dias; i++) {
-    const cents = porDiaNum.get(i) || 0;
-    acc += cents;
-    out.push({ dia: i, cents, acumulado: acc });
-  }
-  return out;
 }
 
 /** Monta o CSV do período (Excel/Sheets abrem direto; separador ponto e vírgula). */

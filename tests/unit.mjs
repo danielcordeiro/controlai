@@ -3,7 +3,7 @@
 
 import {
   parseAmountToCents, fmtBRL, hojeISO, mesDe, mesAdd, mesExtenso, mesCurto,
-  dataCurta, diasNoMes, variacaoPct,
+  dataCurta, diasNoMes, variacaoPct, MAX_CENTAVOS,
 } from "../js/ui.js";
 
 let falhas = 0;
@@ -79,14 +79,22 @@ grupo("diasNoMes", () => {
   eq(diasNoMes("2026-12"), 31, "dezembro");
 });
 
-grupo("hojeISO / dataCurta", () => {
+grupo("hojeISO / dataCurta (fuso da carteira)", () => {
   ok(/^\d{4}-\d{2}-\d{2}$/.test(hojeISO()), "formato YYYY-MM-DD");
-  eq(hojeISO(new Date(2026, 0, 5)), "2026-01-05", "zero à esquerda");
-  eq(hojeISO(new Date(2026, 11, 31)), "2026-12-31", "fim do ano");
   eq(dataCurta("2026-09-19"), "19/09", "data curta");
-  // o dia não pode "andar" por fuso: meia-noite local continua o mesmo dia
-  eq(hojeISO(new Date(2026, 5, 1, 0, 0, 0)), "2026-06-01", "meia-noite local");
-  eq(hojeISO(new Date(2026, 5, 1, 23, 59, 59)), "2026-06-01", "quase meia-noite");
+  // "hoje" é SEMPRE o dia em America/Sao_Paulo, não no fuso do aparelho:
+  // o banco valida data futura nesse fuso, as duas pontas têm que concordar.
+  eq(hojeISO(new Date("2026-01-05T15:00:00Z")), "2026-01-05", "meio da tarde");
+  eq(hojeISO(new Date("2026-01-05T02:00:00Z")), "2026-01-04", "02h UTC ainda é o dia anterior no Brasil");
+  eq(hojeISO(new Date("2026-06-02T02:59:00Z")), "2026-06-01", "quase meia-noite no Brasil");
+  eq(hojeISO(new Date("2026-06-02T03:01:00Z")), "2026-06-02", "logo após a virada no Brasil");
+  eq(hojeISO(new Date("2027-01-01T01:00:00Z")), "2026-12-31", "virada de ano pelo fuso");
+});
+
+grupo("MAX_CENTAVOS (teto do integer do Postgres)", () => {
+  eq(MAX_CENTAVOS, 2147483647, "teto conhecido");
+  ok(parseAmountToCents("21.474.836,47") === MAX_CENTAVOS, "valor exatamente no teto");
+  ok(parseAmountToCents("30.000.000,00") > MAX_CENTAVOS, "acima do teto é detectável antes da RPC");
 });
 
 grupo("variacaoPct", () => {
@@ -98,7 +106,7 @@ grupo("variacaoPct", () => {
 });
 
 // ---------------------------------------------------------------- agregação do mês
-const { porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas } =
+const { porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV } =
   await import("../js/report.js");
 
 const CATS = [
@@ -143,8 +151,22 @@ grupo("porCategoria (rollup pai/filho)", () => {
   eq(soSub[0].id, "c1", "rollup no pai");
   eq(soSub[0].subs.length, 1, "revela a subcategoria única");
   eq(soSub[0].subs[0].name, "Restaurante", "nome da subcategoria");
-  // percentuais
-  ok(Math.abs(linhas.reduce((s, l) => s + l.pct, 0) - 100) < 0.01, "percentuais somam 100");
+  // percentuais: os exibidos (inteiros) precisam fechar 100 exatamente
+  ok(Math.abs(linhas.reduce((s, l) => s + l.pct, 0) - 100) < 0.01, "percentuais brutos somam 100");
+  eq(linhas.reduce((s, l) => s + l.pctExib, 0), 100, "percentuais exibidos somam 100");
+  // caso clássico do 101%: 99,5% + 0,5% arredondados isoladamente dariam 100+1
+  const doisTercos = porCategoria([
+    { id: "a", spent_on: "2026-09-01", amount_cents: 199000, category_id: "c3" },
+    { id: "b", spent_on: "2026-09-01", amount_cents: 1000, category_id: "c2" },
+  ], CATS);
+  eq(doisTercos.reduce((s, l) => s + l.pctExib, 0), 100, "99,5/0,5 fecha 100");
+  // três iguais: 33+33+34
+  const tres = porCategoria([
+    { id: "a", spent_on: "2026-09-01", amount_cents: 1000, category_id: "c3" },
+    { id: "b", spent_on: "2026-09-01", amount_cents: 1000, category_id: "c2" },
+    { id: "c", spent_on: "2026-09-01", amount_cents: 1000, category_id: "c1" },
+  ], CATS);
+  eq(tres.reduce((s, l) => s + l.pctExib, 0), 100, "três terços fecham 100");
   eq(porCategoria([], CATS).length, 0, "mês sem despesa");
   // despesa órfã (categoria apagada) não some do total
   const comOrfa = porCategoria([...DESP, { id: "x", spent_on: "2026-09-11", amount_cents: 1000, category_id: "zzz" }], CATS);
@@ -158,6 +180,24 @@ grupo("porFormaPagamento", () => {
   eq(pix.cents, 155000, "Pix soma aluguel + almoço");
   const semForma = linhas.find((l) => l.id === null);
   eq(semForma.cents, 4000, "sem forma informada é agrupado");
+  eq(linhas.reduce((s, l) => s + l.pctExib, 0), 100, "percentuais exibidos somam 100");
+});
+
+grupo("montaCSV", () => {
+  const csv = montaCSV(DESP, CATS, FORMAS);
+  const linhas = csv.split("\n");
+  eq(linhas.length, DESP.length + 1, "cabeçalho + uma linha por despesa");
+  eq(linhas[0], "Data;Descrição;Categoria;Forma de pagamento;Valor", "cabeçalho");
+  ok(linhas[1].startsWith("2026-09-01"), "ordenado da data mais antiga");
+  ok(csv.includes("Alimentação > Mercado"), "subcategoria sai com o pai");
+  ok(csv.includes("200,00"), "valor em vírgula decimal (pt-BR)");
+  ok(csv.includes(";;"), "despesa sem forma de pagamento deixa a coluna vazia");
+  // ponto e vírgula/aspas no texto não podem quebrar a coluna
+  const perigoso = montaCSV(
+    [{ id: "p", spent_on: "2026-09-01", description: 'uber; "ida"', amount_cents: 100, category_id: "c2" }],
+    CATS, FORMAS);
+  ok(perigoso.split("\n")[1].includes('"uber; ""ida"""'), "texto com ; e aspas é escapado");
+  eq(montaCSV([], CATS, FORMAS).split("\n").length, 1, "sem despesa, só cabeçalho");
 });
 
 grupo("porDia", () => {

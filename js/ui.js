@@ -82,10 +82,22 @@ const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
   "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
 const DIAS = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
 
-/** "YYYY-MM-DD" de hoje no fuso LOCAL do aparelho. */
+/** Fuso da carteira. O Postgres usa o mesmo em _mes_inicio e na trava de data
+ *  futura — se o app usasse o fuso do aparelho, quem abrisse o app viajando
+ *  veria um mês que ainda não começou no Brasil. */
+export const FUSO = "America/Sao_Paulo";
+
+/** "YYYY-MM-DD" de hoje no fuso da carteira (não no do aparelho). */
 export function hojeISO(d = new Date()) {
-  const p = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  try {
+    // "en-CA" já formata como YYYY-MM-DD
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: FUSO, year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(d);
+  } catch {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
 }
 
 /** "YYYY-MM" de uma data "YYYY-MM-DD". */
@@ -145,6 +157,9 @@ export function variacaoPct(para, de) {
 }
 
 // ---------------------------------------------------------------- feedback visual
+
+/** Teto do `integer` do Postgres em centavos (R$ 21.474.836,47). */
+export const MAX_CENTAVOS = 2147483647;
 
 let toastTimer = null;
 /** Mostra um toast temporário. type: "info" | "success" | "error". */
