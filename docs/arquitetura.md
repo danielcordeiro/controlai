@@ -40,6 +40,9 @@ controlai.ledger          carteira (a unidade de acesso)
   name, email             ← e-mail só para recuperar o id
   created_at, last_seen_at
 
+controlai.ledger_email    todo e-mail já registrado na carteira
+  (ledger_id, email) pk   ← trocar o e-mail não tira a recuperação do dono
+
 controlai.category        plano de contas, até 2 níveis
   id, ledger_id, parent_id (self-FK, null = 1º nível)
   name, color, sort_order, archived
@@ -82,9 +85,16 @@ Quatro camadas, da mais externa para a mais interna:
 3. **Gateway por função.** Só as `public.controlai_*` (`SECURITY DEFINER`,
    `set search_path = controlai, public`) têm `GRANT EXECUTE`. As funções
    internas (`controlai._ledger_ok` etc.) têm o execute revogado.
-4. **Validação de posse dentro da função.** Toda escrita confere que a
-   categoria/forma **pertence à carteira** informada. Ter o id de uma categoria
-   alheia não permite gravar nela.
+4. **Validação de posse dentro da função.** Toda mutação recebe o id da
+   **carteira** além do id do objeto e confere o vínculo (`controlai._pertence`).
+   Conhecer o uuid de uma despesa ou categoria solta não permite alterá-la nem
+   apagá-la — verificado: a carteira B recebe *"Este registro não é desta
+   carteira."* ao tentar apagar despesa da carteira A.
+5. **`EXECUTE` revogado de `PUBLIC`.** No Postgres a função nasce aberta para
+   `PUBLIC`; o grant para `anon` não tirava isso. Agora só `anon` e
+   `authenticated` executam, e `search_path` é fixo com `pg_temp` em todas.
+6. **Revogação do link.** `controlai_rotacionar_id` troca o uuid (cascata leva
+   despesas e categorias junto) — é a única forma de derrubar um link vazado.
 
 O UUID v4 da carteira é a credencial (122 bits — não se adivinha). É o mesmo
 modelo de "link secreto" do Rachaí, e está declarado na UI: *"quem tem o link,
@@ -128,8 +138,11 @@ Sem sessão, a função levanta *"Confirme o e-mail para recuperar seus IDs."*
 | `controlai_add_despesa` / `update` / `del` | CRUD da despesa, com as validações de posse e de data futura |
 | `controlai_add_categoria` / `update` / `del` | plano de contas (impede subcategoria de subcategoria) |
 | `controlai_add_forma` / `update` / `del` | formas de pagamento |
-| `controlai_renomear` / `set_email` | ajustes da carteira |
+| `controlai_renomear` / `set_email` | ajustes da carteira (o e-mail antigo continua valendo) |
+| `controlai_rotacionar_id(ledger)` | troca o uuid: a única revogação possível de um link vazado |
+| `controlai_apagar(ledger, confirmacao)` | exclusão self-service, com o id repetido como confirmação |
 | `controlai_exportar(ledger)` | todas as despesas; o CSV é montado no navegador |
+| `controlai_analytics_summary(dias)` | uso do app (service_role); `analytics_summary` voltou a contar só o Rachaí |
 
 O snapshot de mês em **uma chamada** é deliberado: a tela inteira (total, rosca,
 barras, lista, comparação) é desenhada de um JSON só, sem N+1 de rede.
@@ -167,11 +180,47 @@ não ganha uma linha redundante repetindo a si mesma.
   e `Accept-Profile`); `controlai_meus_ids()` recusado sem sessão.
 - Regressão do Rachaí: `get_event()` responde normalmente e as tabelas dele
   continuam bloqueadas.
-- Navegador (Playwright, viewport de celular): criar carteira, lançar despesa,
-  aba Mês com rosca/KPIs/barras, aba Despesas agrupada por dia, criar
-  subcategoria, tela de recuperação. Zero erro no console.
+- Navegador (Playwright, viewport de celular), local e **na URL pública**: criar
+  carteira, folha de boas-vindas com o link, lançar despesa, criar categoria de
+  dentro do formulário sem perder o que foi digitado, aba Mês com rosca/KPIs/
+  barras, aba Despesas agrupada por dia, subcategoria, navegação entre meses com
+  comparação, tela de recuperação e exclusão da carteira. Zero erro no console.
+- Rotação de id e exclusão testadas ponta a ponta (link antigo deixa de abrir,
+  dados preservados na rotação; cascata limpa tudo na exclusão).
 
-## 8. O que ficou fora da v1
+### O que NÃO foi verificado
+O **recebimento do e-mail de recuperação**. Falta um passo no painel do Supabase
+(Redirect URLs) que exige acesso de dono, e não há caixa de entrada disponível
+aqui para abrir o link. A lógica foi conferida (a RPC recusa sem sessão e lê o
+e-mail do JWT), mas o ciclo "pedi o link → abri o e-mail → voltei autenticado"
+continua por testar.
+
+## 8. Achados da revisão adversarial e o que mudou
+
+Duas rodadas de revisão por agentes independentes (segurança, front, números, UX,
+aderência ao pedido) com verificação cética de cada achado. O que virou correção:
+
+| Achado | Correção |
+|---|---|
+| Mutação aceitava só o id do objeto | toda RPC passou a exigir o id da carteira |
+| Link mágico nunca autenticava (o boot apagava o token da URL antes do supabase-js lê-lo) | o boot espera a sessão resolver |
+| `EXECUTE` estava aberto para `PUBLIC` | revogado; só `anon`/`authenticated` |
+| Trocar o e-mail sequestrava a recuperação | histórico `ledger_email`: o antigo continua valendo |
+| Link nunca era entregue depois de criar | folha de boas-vindas com link, cópia e teste de recuperação |
+| Botão de salvar ~600px abaixo do valor no celular | rodapé grudado no sheet |
+| Modal sobrevivia à troca de rota | `router()` fecha as folhas |
+| Resposta lenta vencia a mais recente | número de sequência por requisição |
+| Mês trocava antes da resposta chegar | o mês só vale no sucesso |
+| Projeção multiplicava o aluguel do dia 1 | só a partir do 7º dia |
+| Percentuais somavam 101% | maior resto, fecham 100 |
+| `hojeISO` usava o fuso do aparelho | `America/Sao_Paulo`, igual ao banco |
+| Analytics inflava os números do Rachaí | relatórios separados |
+| Erro do e-mail (`otp_expired`) caía sem explicação | mensagem real na tela |
+| `＋ nova` categoria descartava o formulário | modal por cima, já seleciona a nova |
+| Sem `role=dialog`, Esc, foco, rótulos, `aria-pressed` | tudo adicionado |
+| `schema.sql` não migrava FK em banco existente | bloco `ALTER` idempotente |
+
+## 9. O que ficou fora da v1
 
 Orçamento/meta por categoria, despesa recorrente, receitas (o app é só de
 despesa), múltiplas moedas e anexo de comprovante. O modelo comporta todos —
