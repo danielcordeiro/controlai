@@ -130,7 +130,68 @@ Sem sessão, a função levanta *"Confirme o e-mail para recuperar seus IDs."*
 
 ---
 
-## 5. RPCs
+## 5. API para IA e conector MCP
+
+O app expõe as despesas para uma IA por dois caminhos, ambos autenticados por um
+**token próprio da carteira** (`ctl_...`), guardado em `controlai.ledger.api_token`
+e **separado do UUID do link**. Rotacionar um não derruba o outro: revogar o
+acesso da IA não invalida o seu link, e trocar o link não desconecta a IA.
+
+### Por que uma API separada em vez de reusar as RPCs do app
+As RPCs do app falam em `uuid` e centavos. Uma IA recebe *"gastei 62 no mercado"*.
+As `controlai_api_*` falam a língua do meio: **valor em reais**, **categoria pelo
+nome**, data opcional. O casamento de categoria é sem acento e por prefixo
+(`alimentacao`, `morad`), e quando não acha **erra listando as existentes** em vez
+de criar uma nova — categoria nascida de erro de digitação some do relatório e
+estraga justamente o número que o app existe para mostrar.
+
+| Função | Para quê |
+|---|---|
+| `controlai_api_contexto` | categorias, subcategorias, formas, hoje e mês atual |
+| `controlai_api_lancar` | valor em reais, categoria por nome, data e forma opcionais |
+| `controlai_api_resumo` | total do mês por categoria e por forma, com o mês anterior |
+| `controlai_api_listar` | lançamentos do mês com id, para editar ou apagar |
+| `controlai_api_editar` / `apagar` | alteram só o que foi informado |
+| `controlai_api_criar_categoria` | quando a pessoa realmente quer uma nova |
+| `controlai_get_api_token` / `rotate_api_token` | chamadas pelo app, recebem o uuid da carteira |
+
+### Conector no claude.ai
+GitHub Pages é estático e não hospeda MCP, então o servidor é uma **Supabase Edge
+Function** no mesmo projeto: `supabase/functions/controlai-mcp/`. Transporte
+Streamable HTTP, JSON-RPC 2.0, respostas JSON diretas (sem SSE — `GET` devolve
+405, que é o previsto).
+
+O token vai **no fim da URL** do conector:
+
+```
+https://<ref>.supabase.co/functions/v1/controlai-mcp/ctl_xxxxxxxx
+```
+
+`verify_jwt` fica **desligado** porque o claude.ai não manda chave do Supabase: a
+autenticação é esse token, validado dentro da função pela `controlai._por_token`.
+É a mesma chave portadora do link da carteira, e está escrito na tela que a URL
+deve ser tratada como senha.
+
+Erro de ferramenta volta como `isError` com o texto da exceção, não como erro de
+protocolo — assim o modelo lê *"Categoria X não existe. Disponíveis: ..."* e se
+corrige sozinho em vez de desistir.
+
+## 6. Exportação para Excel
+
+`js/xlsx.js` gera um `.xlsx` **de verdade**, sem dependência: um ZIP (modo
+*stored*, que dispensa deflate) com os XMLs do OOXML. CSV continua disponível,
+mas deixou de ser o padrão porque no Excel em português ele vira uma coluna só e
+o valor entra como texto — não dá para somar nem montar tabela dinâmica.
+
+A planilha sai com data como **data**, valor como **moeda**, cabeçalho congelado,
+filtro automático e **categoria e subcategoria em colunas separadas**, que é o
+formato que serve para tabela dinâmica.
+
+Os testes não confiam no gerador: eles **abrem o ZIP produzido**, conferem o CRC32
+de cada parte e leem o XML da planilha. Fora isso, o `file` do sistema reconhece
+o arquivo como *Microsoft Excel 2007+* e o `unzip -t` passa sem erro.
+
+## 7. RPCs
 
 | Função | Para quê |
 |---|---|
@@ -151,18 +212,19 @@ barras, lista, comparação) é desenhada de um JSON só, sem N+1 de rede.
 
 ---
 
-## 6. Front
+## 8. Front
 
 ```
 js/ui.js       DOM, dinheiro em centavos (parse pt-BR/en-US), datas e meses, toast, CSV download
 js/report.js   agregações PURAS: por categoria (com rollup pai/filho), por forma,
                por dia, maiores despesas, CSV
 js/db.js       wrapper das RPCs + fluxo de Auth da recuperação
+js/xlsx.js     gerador de .xlsx (ZIP stored + OOXML), puro e testado
 js/app.js      rotas (#/ · #/c/<uuid> · #/recuperar), telas e formulários
 ```
 
 `report.js` e os helpers de `ui.js` são puros e cobertos por `tests/unit.mjs`
-(**127 verificações**): conversão de valor, aritmética de meses (virada de ano,
+(**162 verificações**): conversão de valor, aritmética de meses (virada de ano,
 bissexto), rollup de subcategoria, despesa órfã que não some do total, ida e
 volta de formatação.
 
@@ -172,7 +234,7 @@ não ganha uma linha redundante repetindo a si mesma.
 
 ---
 
-## 7. Verificação feita
+## 9. Verificação feita
 
 - `npm test` — 108/108.
 - RPCs testadas via REST com a publishable key (criar, lançar com e sem forma de
@@ -197,7 +259,7 @@ aqui para abrir o link. A lógica foi conferida (a RPC recusa sem sessão e lê 
 e-mail do JWT), mas o ciclo "pedi o link → abri o e-mail → voltei autenticado"
 continua por testar.
 
-## 8. Achados da revisão adversarial e o que mudou
+## 10. Achados da revisão adversarial e o que mudou
 
 Duas rodadas de revisão por agentes independentes (segurança, front, números, UX,
 aderência ao pedido) com verificação cética de cada achado. O que virou correção:
@@ -222,8 +284,10 @@ aderência ao pedido) com verificação cética de cada achado. O que virou corr
 | Sem `role=dialog`, Esc, foco, rótulos, `aria-pressed` | tudo adicionado |
 | `schema.sql` não migrava FK em banco existente | bloco `ALTER` idempotente |
 
-## 9. O que ficou fora da v1
+## 11. O que ficou fora da v1
 
 Orçamento/meta por categoria, despesa recorrente, receitas (o app é só de
-despesa), múltiplas moedas e anexo de comprovante. O modelo comporta todos —
+despesa), múltiplas moedas e anexo de comprovante. OAuth no conector MCP também
+ficou fora: para conector pessoal o claude.ai aceita servidor sem autenticação, e
+o token na URL já é o mesmo nível de segredo do link da carteira. O modelo comporta todos —
 nenhum exigiria migração destrutiva.
