@@ -1011,9 +1011,19 @@ function openModal(title, contentNode) {
 // ---------------------------------------------------------------------------
 window.addEventListener("hashchange", router);
 
-// Voltou do link mágico do e-mail: o supabase-js consome o token da URL e a
-// gente manda direto para a tela de carteiras recuperadas.
 if (VEIO_DO_EMAIL && !parseRoute().id) {
-  history.replaceState(null, "", `${location.pathname}#/recuperar`);
+  // Voltou do link mágico do e-mail. O token vem no fragmento da URL e quem o
+  // consome é o supabase-js, de forma assíncrona. Trocar a rota agora apagaria
+  // o fragmento ANTES disso e a sessão nunca seria criada — por isso esperamos
+  // a sessão resolver (o próprio supabase-js limpa o token da URL) e só então
+  // mandamos para a tela de recuperação.
+  renderCarregando();
+  auth.sessao()
+    .catch(() => null)
+    .then(() => {
+      history.replaceState(null, "", `${location.pathname}#/recuperar`);
+      router();
+    });
+} else {
+  router();
 }
-router();
