@@ -37,8 +37,10 @@ A carteira abre em 4 abas:
 
 ### ⚙️ Ajustes
 - Seu **ID/link** de acesso, com botão de copiar.
-- Nome da carteira e **e-mail de recuperação**.
+- Nome da carteira e **e-mail de recuperação** (o antigo continua valendo para recuperar).
 - **Exportar CSV** de todas as despesas (abre no Excel/Sheets).
+- **Gerar um ID novo** — se o link vazar, isso derruba o antigo na hora sem perder nada.
+- **Apagar a carteira** de vez, self-service.
 
 ### Em todo o app
 - **Mobile-first**, com botão flutuante **＋ Despesa** sempre à mão.
@@ -91,8 +93,13 @@ Mesmo modelo do [Rachaí](https://github.com/danielcordeiro/rachai), um passo ma
 2. **RLS ligada** em todas as tabelas, **sem policy pública**.
 3. Todo acesso passa pelas funções `public.controlai_*` (`SECURITY DEFINER`), as
    únicas com `GRANT EXECUTE` para `anon`.
-4. Cada função valida que a categoria/forma **pertence à carteira** informada —
-   não dá para gravar na carteira dos outros nem com o id na mão.
+4. **Toda mutação exige o id da carteira**, não só o do objeto: conhecer o uuid de
+   uma despesa ou categoria solta não permite alterá-la nem apagá-la.
+5. `EXECUTE` é revogado de `PUBLIC` e concedido só a `anon`/`authenticated`
+   (no Postgres a função nasce aberta para `PUBLIC`), e `search_path` é fixo com
+   `pg_temp` em todas elas.
+6. O link é uma chave portadora, então existe revogação: **gerar um ID novo** em
+   Ajustes invalida o anterior.
 
 A `publishable key` no `config.js` é **pública por design** (é o que o navegador usa);
 o que protege os dados é o modelo acima.

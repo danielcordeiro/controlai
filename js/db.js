@@ -34,15 +34,19 @@ export function chegouDoEmail() {
 
 /** Mensagem do erro que o Supabase devolveu no retorno do e-mail, ou null. */
 export function erroDoEmail() {
-  const u = String(location.hash || "").replace(/^#/, "") + "&" + String(location.search || "").replace(/^\?/, "");
-  const p = new URLSearchParams(u);
-  if (!p.get("error") && !p.get("error_code")) return null;
-  const desc = p.get("error_description");
-  if (desc) return decodeURIComponent(desc.replace(/\+/g, " "));
-  const code = p.get("error_code") || p.get("error");
-  return code === "otp_expired"
-    ? "O link expirou. Peça um novo."
-    : `Não consegui confirmar o e-mail (${code}).`;
+  try {
+    const u = String(location.hash || "").replace(/^#/, "") + "&" + String(location.search || "").replace(/^\?/, "");
+    const p = new URLSearchParams(u); // já decodifica %xx e '+' — não decodificar de novo
+    const code = p.get("error_code") || p.get("error");
+    if (!code) return null;
+    const desc = p.get("error_description");
+    if (desc) return desc;
+    return code === "otp_expired"
+      ? "O link expirou. Peça um novo."
+      : `Não consegui confirmar o e-mail (${code}).`;
+  } catch {
+    return null;
+  }
 }
 
 /** Traduz o erro do Supabase para uma frase que o usuário entende. */
@@ -87,6 +91,11 @@ export const db = {
   renomear: (ledgerId, name) => rpc("controlai_renomear", { p_ledger: ledgerId, p_name: name }),
   setEmail: (ledgerId, email) => rpc("controlai_set_email", { p_ledger: ledgerId, p_email: email }),
   exportar: (ledgerId) => rpc("controlai_exportar", { p_ledger: ledgerId }),
+  /** Troca o UUID da carteira: a única forma de revogar um link que vazou. */
+  rotacionarId: (ledgerId) => rpc("controlai_rotacionar_id", { p_ledger: ledgerId }),
+  /** Apaga a carteira e tudo dentro dela. Exige repetir o id como confirmação. */
+  apagar: (ledgerId, confirmacao) =>
+    rpc("controlai_apagar", { p_ledger: ledgerId, p_confirmacao: confirmacao }),
 
   // ---- despesas -------------------------------------------------------------
   addDespesa: (ledgerId, spentOn, amountCents, categoryId, paymentMethodId, description) =>

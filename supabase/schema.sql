@@ -43,7 +43,7 @@ create index if not exists ledger_email_idx on controlai.ledger (email);
 -- continua recuperando pelo endereço antigo. Não abre exposição nova: quem teve
 -- o link já tem acesso permanente por ele.
 create table if not exists controlai.ledger_email (
-  ledger_id uuid not null references controlai.ledger(id) on delete cascade,
+  ledger_id uuid not null references controlai.ledger(id) on update cascade on delete cascade,
   email     text not null,
   added_at  timestamptz not null default now(),
   primary key (ledger_id, email)
@@ -53,7 +53,7 @@ create index if not exists ledger_email_email_idx on controlai.ledger_email (ema
 -- Plano de contas: até 2 níveis (categoria > subcategoria).
 create table if not exists controlai.category (
   id         uuid primary key default gen_random_uuid(),
-  ledger_id  uuid not null references controlai.ledger(id) on delete cascade,
+  ledger_id  uuid not null references controlai.ledger(id) on update cascade on delete cascade,
   parent_id  uuid references controlai.category(id) on delete cascade,
   name       text not null,
   color      text not null default '#6366f1',
@@ -70,7 +70,7 @@ create unique index if not exists category_nome_unq
 -- Forma de pagamento (opcional na despesa).
 create table if not exists controlai.payment_method (
   id         uuid primary key default gen_random_uuid(),
-  ledger_id  uuid not null references controlai.ledger(id) on delete cascade,
+  ledger_id  uuid not null references controlai.ledger(id) on update cascade on delete cascade,
   name       text not null,
   sort_order integer not null default 100,
   archived   boolean not null default false,
@@ -83,7 +83,7 @@ create unique index if not exists payment_method_nome_unq
 -- Despesa: data + categoria (obrigatórias) + forma de pagamento (opcional).
 create table if not exists controlai.expense (
   id                uuid primary key default gen_random_uuid(),
-  ledger_id         uuid not null references controlai.ledger(id) on delete cascade,
+  ledger_id         uuid not null references controlai.ledger(id) on update cascade on delete cascade,
   spent_on          date not null,
   amount_cents      integer not null check (amount_cents > 0),
   category_id       uuid not null references controlai.category(id) on delete restrict,
@@ -651,11 +651,65 @@ begin
 end;
 $$;
 
+-- Rotacionar o ID ------------------------------------------------------------
+-- O link é uma chave portadora: uma vez vazado, não há como revogá-lo a não ser
+-- trocando o id. A cascata (on update cascade) leva despesas, categorias e
+-- formas junto, então nada se perde — só o link antigo morre.
+create or replace function public.controlai_rotacionar_id(p_ledger uuid)
+returns uuid
+language plpgsql
+security definer
+set search_path = controlai, public, pg_temp
+as $$
+declare v_novo uuid;
+begin
+  perform controlai._ledger_ok(p_ledger);
+  v_novo := gen_random_uuid();
+  update controlai.ledger set id = v_novo where id = p_ledger;
+  return v_novo;
+end;
+$$;
+
+-- Apagar a carteira ----------------------------------------------------------
+-- A política de privacidade promete exclusão; aqui ela é self-service. Exige
+-- repetir o id para não apagar tudo num toque errado.
+create or replace function public.controlai_apagar(p_ledger uuid, p_confirmacao uuid)
+returns void
+language plpgsql
+security definer
+set search_path = controlai, public, pg_temp
+as $$
+begin
+  perform controlai._ledger_ok(p_ledger);
+  if p_confirmacao is distinct from p_ledger then
+    raise exception 'Confirmação não confere. Cole o ID exato da carteira para apagar.';
+  end if;
+  delete from controlai.ledger where id = p_ledger;
+end;
+$$;
+
 -- ----------------------------------------------------------------------------
 -- Permissões: anon/authenticated só podem EXECUTAR as funções acima.
 -- ----------------------------------------------------------------------------
 revoke all on all tables in schema controlai from anon, authenticated;
 revoke all on schema controlai from anon, authenticated;
+-- tabela/função criada aqui depois já nasce fechada
+alter default privileges in schema controlai revoke all on tables    from anon, authenticated;
+alter default privileges in schema controlai revoke all on functions from anon, authenticated;
+
+-- No Postgres a função nasce com EXECUTE para PUBLIC: sem este revoke, o grant
+-- abaixo não restringe nada.
+do $$
+declare f record;
+begin
+  for f in
+    select p.oid::regprocedure::text as sig
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname like 'controlai\_%'
+  loop
+    execute format('revoke execute on function %s from public', f.sig);
+  end loop;
+end $$;
 
 grant execute on function
   public.controlai_criar(text, text),
@@ -672,7 +726,9 @@ grant execute on function
   public.controlai_del_forma(uuid, uuid),
   public.controlai_renomear(uuid, text),
   public.controlai_set_email(uuid, text),
-  public.controlai_exportar(uuid)
+  public.controlai_exportar(uuid),
+  public.controlai_rotacionar_id(uuid),
+  public.controlai_apagar(uuid, uuid)
 to anon, authenticated;
 
 -- As funções internas do schema controlai não são chamáveis de fora.

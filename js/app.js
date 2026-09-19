@@ -997,6 +997,42 @@ function abaAjustes() {
     ]),
 
     el("div", { class: "card" }, [
+      el("h3", { class: "sheet__title", text: "Segurança do link" }),
+      el("p", { class: "small muted", style: "margin:6px 0 10px", text: "Mandou o link para alguém sem querer? Gerar um ID novo derruba o link antigo na hora. Suas despesas continuam todas aqui." }),
+      el("button", {
+        class: "btn btn--ghost btn--block", text: "Gerar um ID novo (invalida o link atual)",
+        onClick: async () => {
+          if (!confirmAction("Gerar um ID novo? O link atual para de funcionar — quem tiver ele perde o acesso, inclusive seus outros aparelhos.")) return;
+          try {
+            const novoId = await db.rotacionarId(state.ledgerId);
+            esquecerCarteira(state.ledgerId);
+            lembrarCarteira(novoId, s.ledger.name);
+            toast("ID trocado. Guarde o link novo.", "success");
+            location.hash = `#/c/${novoId}`;
+          } catch (e) { toast(e.message, "error"); }
+        },
+      }),
+    ]),
+
+    el("div", { class: "card" }, [
+      el("h3", { class: "sheet__title", text: "Apagar esta carteira" }),
+      el("p", { class: "small muted", style: "margin:6px 0 10px", text: "Apaga de vez as despesas, categorias e o e-mail. Não dá para desfazer — exporte o CSV antes se quiser guardar." }),
+      el("button", {
+        class: "btn btn--danger btn--block", text: "Apagar tudo",
+        onClick: async () => {
+          if (!confirmAction(`Apagar "${s.ledger.name}" e TODAS as despesas? Isso não tem volta.`)) return;
+          if (!confirmAction("Confirmando: tudo será apagado agora.")) return;
+          try {
+            await db.apagar(state.ledgerId, state.ledgerId);
+            esquecerCarteira(state.ledgerId);
+            toast("Carteira apagada.", "success");
+            location.hash = "#/";
+          } catch (e) { toast(e.message, "error"); }
+        },
+      }),
+    ]),
+
+    el("div", { class: "card" }, [
       el("h3", { class: "sheet__title", text: "Neste aparelho" }),
       el("p", { class: "small muted", style: "margin:6px 0 10px", text: "Remove o atalho desta carteira só deste navegador. Os dados continuam no servidor e o link continua funcionando." }),
       el("button", {
