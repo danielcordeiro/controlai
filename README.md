@@ -137,6 +137,12 @@ Push na `main` publica no GitHub Pages (Settings → Pages → branch `main`, pa
 
 ---
 
+## 🔐 Privacidade
+
+O app guarda as despesas, o nome da carteira e o e-mail de recuperação. Sem anúncios,
+sem cookies de rastreamento, sem terceiros além da biblioteca do Supabase.
+Detalhes em [privacy.html](https://danielcordeiro.github.io/controlai/privacy.html).
+
 ## 📄 Licença
 
 MIT.

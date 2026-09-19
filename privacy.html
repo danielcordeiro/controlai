@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#4338ca" />
+  <title>Controlaí — Política de Privacidade</title>
+  <link rel="icon" href="assets/logo.png" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="index.html">
+      <img class="brand__logo" src="assets/logo.png" alt="Controlaí" width="28" height="28" />
+      <span class="brand__name">Controlaí</span>
+    </a>
+  </header>
+
+  <main class="wrap">
+    <div class="card">
+      <h1 style="font-size:24px">Política de Privacidade</h1>
+      <p class="muted small">Atualizada em 19/09/2026.</p>
+
+      <h2 class="section">O que guardamos</h2>
+      <ul>
+        <li><b>Suas despesas:</b> data, valor, categoria, forma de pagamento (opcional) e a descrição que você escrever.</li>
+        <li><b>Nome da carteira</b> e o <b>e-mail</b> que você informou na criação.</li>
+        <li><b>Uso do app:</b> contagem de páginas abertas e ações (sem cookies, sem identificar você), com um
+          identificador aleatório guardado no seu navegador só para contar visitantes únicos.</li>
+      </ul>
+
+      <h2 class="section">Para que serve o e-mail</h2>
+      <p>
+        Só para você <b>recuperar o ID</b> da sua carteira se perder o link. Quando você pede a recuperação,
+        enviamos um link (ou um código) para esse endereço — e é preciso abrir esse e-mail para ver as carteiras.
+        Não mandamos newsletter, não vendemos e não compartilhamos seu endereço.
+      </p>
+
+      <h2 class="section">Quem consegue ver</h2>
+      <p>
+        O acesso à carteira é pelo <b>link com o ID</b> — quem tiver o link, entra. Trate-o como uma senha.
+        Os dados ficam em um banco Postgres no <b>Supabase</b>, com as tabelas fora do alcance da API pública:
+        todo acesso passa por funções que validam o que pode ser lido e escrito.
+      </p>
+
+      <h2 class="section">Apagar seus dados</h2>
+      <p>
+        Escreva para <a href="mailto:dgodinhoc@gmail.com">dgodinhoc@gmail.com</a> com o ID da carteira e apagamos
+        tudo — despesas, categorias e o e-mail. Você também pode exportar tudo em CSV, em Ajustes, antes disso.
+      </p>
+
+      <h2 class="section">Sem anúncios, sem rastreadores</h2>
+      <p>
+        O Controlaí não tem publicidade, não usa cookies de rastreamento e não carrega scripts de terceiros
+        além da biblioteca que conversa com o banco.
+      </p>
+
+      <p style="margin-top:22px"><a class="btn btn--ghost" href="index.html">Voltar ao app</a></p>
+    </div>
+  </main>
+</body>
+</html>
