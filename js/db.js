@@ -124,6 +124,38 @@ export const db = {
   delDespesa: (ledgerId, expenseId) =>
     rpc("controlai_del_despesa", { p_ledger: ledgerId, p_expense: expenseId }),
 
+  // ---- despesas fixas (recorrentes) -----------------------------------------
+  addFixa: (ledgerId, descricao, amountCents, categoryId, dia, mesInicio, totalMeses, paymentMethodId) =>
+    rpc("controlai_add_fixa", {
+      p_ledger: ledgerId,
+      p_descricao: descricao || "",
+      p_amount_cents: amountCents,
+      p_category: categoryId,
+      p_dia: dia,
+      p_mes_inicio: mesInicio || null,
+      p_total_meses: totalMeses ?? null,
+      p_payment_method: paymentMethodId || null,
+    }),
+  updateFixa: (ledgerId, fixaId, descricao, amountCents, categoryId, dia, totalMeses, paymentMethodId) =>
+    rpc("controlai_update_fixa", {
+      p_ledger: ledgerId,
+      p_fixa: fixaId,
+      p_descricao: descricao || "",
+      p_amount_cents: amountCents,
+      p_category: categoryId,
+      p_dia: dia,
+      p_total_meses: totalMeses ?? null,
+      p_payment_method: paymentMethodId || null,
+    }),
+  cancelarFixa: (ledgerId, fixaId, aPartirDe) =>
+    rpc("controlai_cancelar_fixa", { p_ledger: ledgerId, p_fixa: fixaId, p_a_partir_de: aPartirDe || null }),
+  reativarFixa: (ledgerId, fixaId) =>
+    rpc("controlai_reativar_fixa", { p_ledger: ledgerId, p_fixa: fixaId }),
+  delFixa: (ledgerId, fixaId, manterLancamentos) =>
+    rpc("controlai_del_fixa", {
+      p_ledger: ledgerId, p_fixa: fixaId, p_manter_lancamentos: !!manterLancamentos,
+    }),
+
   // ---- plano de contas ------------------------------------------------------
   addCategoria: (ledgerId, name, parentId, color) =>
     rpc("controlai_add_categoria", { p_ledger: ledgerId, p_name: name, p_parent: parentId || null, p_color: color || null }),

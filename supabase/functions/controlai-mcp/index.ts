@@ -18,7 +18,7 @@
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-const VERSAO = "1.0.0";
+const VERSAO = "1.2.0";
 const PROTOCOLO_PADRAO = "2025-06-18";
 
 const CORS = {
@@ -91,8 +91,9 @@ const FERRAMENTAS: Ferramenta[] = [
   {
     name: "listar_despesas",
     description:
-      "Lista os lançamentos de um mês, do mais recente para o mais antigo, com o id de cada um. " +
-      "Use para achar o id antes de editar ou apagar. Pode filtrar por categoria.",
+      "Lista os lançamentos de um mês, do mais recente para o mais antigo, com o id de cada um e o campo " +
+      "'de_fixa' dizendo se o lançamento nasceu de uma despesa fixa. Use para achar o id antes de editar ou " +
+      "apagar. Pode filtrar por categoria.",
     rpc: "controlai_api_listar",
     inputSchema: {
       type: "object",
@@ -133,11 +134,96 @@ const FERRAMENTAS: Ferramenta[] = [
   },
   {
     name: "apagar_despesa",
-    description: "Apaga um lançamento pelo id. Confirme com a pessoa antes de chamar.",
+    description:
+      "Apaga UM lançamento pelo id. Confirme com a pessoa antes de chamar. Se o lançamento veio de uma despesa fixa " +
+      "(listar_despesas marca com de_fixa), apagar vale só para aquele mês: a fixa continua e nos próximos meses " +
+      "lança de novo. Para parar a série inteira é 'cancelar_fixa', não esta.",
     rpc: "controlai_api_apagar",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", description: "id do lançamento (uuid)" } },
+      required: ["id"],
+    },
+    mapa: { id: "p_id" },
+  },
+  {
+    name: "criar_fixa",
+    description:
+      "Cria uma DESPESA FIXA (recorrente), para 'todo mês pago X'. Ela entra sozinha quando cada mês chega — nunca adianta " +
+      "o futuro. Informe 'meses' para um número de repetições (12, por exemplo) ou omita para repetir até cancelar. " +
+      "A ocorrência do mês corrente já é lançada.",
+    rpc: "controlai_api_criar_fixa",
+    inputSchema: {
+      type: "object",
+      properties: {
+        valor: { type: "number", description: "Valor em reais, ex.: 1500" },
+        categoria: { type: "string", description: "Nome da categoria, ex.: Moradia" },
+        dia: { type: "integer", description: "Dia do mês (1-31). Omita para o dia de hoje. Mês sem esse dia usa o último." },
+        meses: { type: "integer", description: "Quantas vezes repetir. OMITA para repetir até a pessoa cancelar." },
+        mes_inicio: { type: "string", description: "AAAA-MM do primeiro mês. Omita para começar neste mês." },
+        forma_pagamento: { type: "string", description: "Opcional." },
+        descricao: { type: "string", description: "Ex.: 'Aluguel'. Opcional, mas ajuda a reconhecer na lista." },
+      },
+      required: ["valor", "categoria"],
+    },
+    mapa: {
+      valor: "p_valor",
+      categoria: "p_categoria",
+      dia: "p_dia",
+      meses: "p_meses",
+      mes_inicio: "p_mes_inicio",
+      forma_pagamento: "p_forma",
+      descricao: "p_descricao",
+    },
+  },
+  {
+    name: "editar_fixa",
+    description:
+      "Altera uma despesa fixa daqui para frente; o que já foi lançado NÃO muda. Pegue o id em listar_fixas e " +
+      "informe só os campos que mudam. Para tirar o prazo e deixar rodando até cancelar, use ate_cancelar=true.",
+    rpc: "controlai_api_editar_fixa",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "id da despesa fixa (uuid)" },
+        valor: { type: "number", description: "Novo valor em reais." },
+        categoria: { type: "string", description: "Nova categoria, pelo nome." },
+        dia: { type: "integer", description: "Novo dia do mês (1-31)." },
+        meses: { type: "integer", description: "Novo total de repetições, contado desde o mês de início." },
+        ate_cancelar: { type: "boolean", description: "true tira o prazo: passa a repetir até a pessoa cancelar." },
+        forma_pagamento: { type: "string", description: "Nova forma de pagamento." },
+        descricao: { type: "string", description: "Nova descrição." },
+      },
+      required: ["id"],
+    },
+    mapa: {
+      id: "p_id",
+      valor: "p_valor",
+      categoria: "p_categoria",
+      dia: "p_dia",
+      meses: "p_meses",
+      ate_cancelar: "p_ate_cancelar",
+      forma_pagamento: "p_forma",
+      descricao: "p_descricao",
+    },
+  },
+  {
+    name: "listar_fixas",
+    description:
+      "Lista as despesas fixas da carteira, com valor, dia, quantas já foram lançadas, quantas faltam e se ainda estão ativas.",
+    rpc: "controlai_api_listar_fixas",
+    inputSchema: { type: "object", properties: {}, required: [] },
+    mapa: {},
+  },
+  {
+    name: "cancelar_fixa",
+    description:
+      "Para de lançar uma despesa fixa a partir do mês que vem. O que já foi lançado continua no histórico. " +
+      "Pegue o id em listar_fixas e confirme com a pessoa antes.",
+    rpc: "controlai_api_cancelar_fixa",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "id da despesa fixa (uuid)" } },
       required: ["id"],
     },
     mapa: { id: "p_id" },
@@ -206,7 +292,10 @@ async function executaFerramenta(nome: string, args: Record<string, unknown>, to
   const params: Record<string, unknown> = { p_token: token };
   for (const [de, para] of Object.entries(f.mapa)) {
     const v = args?.[de];
-    if (v !== undefined && v !== null && v !== "") params[para] = v;
+    // string vazia é "não informou"; false e 0 são valores e precisam passar
+    if (v === undefined || v === null) continue;
+    if (typeof v === "string" && v.trim() === "") continue;
+    params[para] = v;
   }
   return await chamaRpc(f.rpc, params);
 }
@@ -231,7 +320,9 @@ async function trata(msg: Record<string, unknown>, token: string): Promise<unkno
           serverInfo: { name: "controlai", version: VERSAO },
           instructions:
             "Controle de despesas pessoais do Controlaí. Valores em reais e categorias pelo nome. " +
-            "Chame 'contexto' no início para saber quais categorias existem. Para 'quanto gastei este mês', use 'resumo_do_mes'.",
+            "Chame 'contexto' no início para saber quais categorias existem. Para 'quanto gastei este mês', use " +
+            "'resumo_do_mes'. Gasto que se repete todo mês (aluguel, assinatura) é 'criar_fixa', não uma despesa por " +
+            "mês. Para mudar uma fixa use 'editar_fixa': cancelar e criar outra duplicaria o lançamento deste mês.",
         },
       };
     }

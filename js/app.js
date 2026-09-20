@@ -545,6 +545,35 @@ function navegadorMes() {
 }
 
 // ---- aba MÊS ---------------------------------------------------------------
+/**
+ * Card discreto de "me paga um café via Pix", no fim da aba Mês — depois de o
+ * app já ter mostrado para onde foi o dinheiro, não antes. Opt-in: sem PIX no
+ * config.js devolve null e nada aparece.
+ */
+function cardApoio() {
+  const pix = (window.CONTROLAI_CONFIG || {}).PIX;
+  const valor = pix && (pix.payload || pix.key);
+  if (!valor) return null;
+
+  const btn = el("button", {
+    class: "btn btn--primary btn--sm", type: "button",
+    text: pix.payload ? "💚 Pix copia e cola" : "💚 Copiar chave Pix",
+    onClick: async () => {
+      const ok = await copyText(valor);
+      if (ok) db.track("apoio_copiar", "carteira");
+      toast(ok ? "Pix copiado — é só colar no seu banco 💚" : "Não consegui copiar.", ok ? "success" : "error");
+    },
+  });
+
+  return el("div", { class: "donate" }, [
+    el("p", { class: "donate__title", text: "Curtiu o controlaí? ☕" }),
+    el("p", { class: "donate__sub", text:
+      "É grátis e sem anúncio. Se ajudou, me paga um café — qualquer valor ajuda a manter de pé." }),
+    btn,
+    pix.name ? el("p", { class: "donate__name muted small", text: pix.name }) : null,
+  ]);
+}
+
 function abaMes() {
   const s = state.snapshot;
   const desp = s.expenses || [];
@@ -558,6 +587,7 @@ function abaMes() {
         el("h2", { text: "Nenhuma despesa neste mês" }),
         el("p", { text: "Toque em “＋ Despesa” para lançar a primeira." }),
       ]),
+      cardApoio(),
     ]);
   }
 
@@ -610,6 +640,8 @@ function abaMes() {
         el("b", { text: fmtBRL(d.amount_cents) }),
       ]);
     })),
+
+    cardApoio(),
   ]);
 }
 
@@ -731,7 +763,10 @@ function abaDespesas() {
           el("span", { class: "exp__dot", style: `background:${(pai || cat)?.color || "#9ca3af"}` }),
           el("div", { class: "exp__main" }, [
             el("div", { class: "exp__desc", text: d.description || nomeCat }),
-            el("div", { class: "exp__meta", text: d.description ? `${nomeCat}${forma ? ` · ${forma}` : ""}` : (forma || "sem forma de pagamento") }),
+            el("div", { class: "exp__meta" }, [
+              d.recurring_id ? el("span", { class: "tag tag--fixa", text: "fixa" }) : null,
+              d.description ? `${nomeCat}${forma ? ` · ${forma}` : ""}` : (forma || "sem forma de pagamento"),
+            ]),
           ]),
           el("span", { class: "exp__amount", text: fmtBRL(d.amount_cents) }),
           el("span", { class: "exp__chevron", "aria-hidden": "true", text: "›" }),
@@ -835,13 +870,31 @@ function abrirFormDespesa(despesa) {
     );
   }
 
+  // --- repetir todo mês (só ao criar; editar mexe na ocorrência, não na série)
+  let repetir = false;
+  const repeticoes = seletorRepeticoes(12);
+  const blocoRepetir = el("div", { style: "display:none" });
+
+  const checkRepetir = el("input", { type: "checkbox" });
+  checkRepetir.addEventListener("change", () => {
+    repetir = checkRepetir.checked;
+    blocoRepetir.style.display = repetir ? "" : "none";
+  });
+  blocoRepetir.append(
+    el("div", { class: "small muted", style: "margin:2px 0 6px" , text:
+      "Lança sozinha todo mês, no mesmo dia da data acima. Só aparece quando o mês chega — nunca adianta o futuro." }),
+    repeticoes.node,
+  );
+
   desenhaCategorias();
   desenhaSubs();
   desenhaFormas();
 
   const btnSalvar = el("button", { class: "btn btn--primary btn--lg", text: editando ? "Salvar" : "Lançar despesa" });
 
+  let salvando = false;
   const salvar = async () => {
+    if (salvando) return;   // Enter repetido chega aqui sem passar pelo botão
     const cents = parseAmountToCents(valor.value);
     if (!cents) { toast("Informe um valor maior que zero.", "error"); valor.focus(); return; }
     if (cents > MAX_CENTAVOS) {
@@ -851,11 +904,20 @@ function abrirFormDespesa(despesa) {
     }
     if (!catSel) { toast("Escolha uma categoria.", "error"); return; }
     if (!data.value) { toast("Informe a data.", "error"); return; }
+    const rep = repetir ? repeticoes.ler() : { ok: true, vezes: null };
+    if (!rep.ok) { toast(rep.erro, "error"); return; }
+    salvando = true;
     btnSalvar.disabled = true;
     btnSalvar.textContent = "Salvando...";
     try {
       if (editando) {
         await db.updateDespesa(state.ledgerId, despesa.id, data.value, cents, catSel, formaSel, descricao.value);
+      } else if (repetir) {
+        // cria só a SÉRIE: a ocorrência deste mês nasce no próximo carregamento
+        const dia = Number(String(data.value).slice(8, 10)) || 1;
+        await db.addFixa(state.ledgerId, descricao.value, cents, catSel, dia,
+          mesDe(data.value), rep.vezes, formaSel);
+        db.track("criar_fixa", "carteira");
       } else {
         await db.addDespesa(state.ledgerId, data.value, cents, catSel, formaSel, descricao.value);
         db.track("lancar_despesa", "carteira");
@@ -863,9 +925,12 @@ function abrirFormDespesa(despesa) {
       fechar();
       // lançou em outro mês? a tela vai junto, senão a despesa "some"
       await recarregar(mesDe(data.value));
-      toast(editando ? "Despesa atualizada." : "Despesa lançada.", "success");
+      toast(editando ? "Despesa atualizada."
+        : repetir ? (rep.vezes ? `Fixa criada: vai lançar ${rep.vezes} vezes.` : "Fixa criada: lança todo mês até você cancelar.")
+        : "Despesa lançada.", "success");
     } catch (err) {
       toast(err.message, "error");
+      salvando = false;
       btnSalvar.disabled = false;
       btnSalvar.textContent = editando ? "Salvar" : "Lançar despesa";
     }
@@ -879,6 +944,16 @@ function abrirFormDespesa(despesa) {
     campo("Data", data),
     el("label", { class: "label", text: "Forma de pagamento (opcional)" }), chipsForma,
     campo("Descrição (opcional)", descricao),
+    !editando
+      ? el("div", { style: "margin-top:14px" }, [
+          el("label", { class: "choice" }, [checkRepetir, "Repetir todo mês (despesa fixa)"]),
+          blocoRepetir,
+        ])
+      : null,
+    editando && despesa.recurring_id
+      ? el("p", { class: "small muted", style: "margin-top:12px", text:
+          "Esta veio de uma despesa fixa. A alteração vale só para este mês; para mudar a série, use Ajustes → Despesas fixas." })
+      : null,
     editando
       ? el("button", {
           class: "btn btn--danger btn--block",
@@ -1078,6 +1153,210 @@ function abrirFormForma(f) {
   const { close } = openModal("Editar forma de pagamento", corpo);
 }
 
+/**
+ * Escolha de quantas vezes a fixa se repete. Os atalhos cobrem o caso comum,
+ * mas "outro" existe porque a IA pode criar uma fixa de 7 ou 18 meses — sem o
+ * campo livre, abrir essa fixa para editar não mostraria nenhum chip aceso e a
+ * pessoa não saberia dizer o que está valendo.
+ */
+function seletorRepeticoes(inicial) {
+  const PADRAO = [3, 6, 12, 24];
+  let vezes = inicial === undefined ? 12 : inicial;   // null = até cancelar
+  let livre = vezes !== null && !PADRAO.includes(vezes);
+
+  const chips = el("div", { class: "chips" });
+  const campoNum = el("input", {
+    type: "number", min: "1", max: "600", inputmode: "numeric",
+    class: "input", style: "max-width:10rem;margin-top:8px",
+    placeholder: "quantos meses", "aria-label": "Quantas vezes repetir",
+  });
+  if (livre) campoNum.value = String(vezes);
+  campoNum.addEventListener("input", () => {
+    const n = parseInt(campoNum.value, 10);
+    vezes = Number.isFinite(n) && n >= 1 ? Math.min(n, 600) : NaN;
+  });
+
+  function desenha() {
+    clear(chips);
+    for (const [v, rotulo] of [[3, "3x"], [6, "6x"], [12, "12x"], [24, "24x"],
+                               ["livre", "outro"], [null, "até eu cancelar"]]) {
+      const on = v === "livre" ? livre : (!livre && vezes === v);
+      chips.append(el("button", {
+        class: `chip ${on ? "chip--on" : ""}`, type: "button", text: rotulo,
+        "aria-pressed": on ? "true" : "false",
+        onClick: () => {
+          if (v === "livre") {
+            livre = true;
+            const n = parseInt(campoNum.value, 10);
+            vezes = Number.isFinite(n) && n >= 1 ? n : NaN;
+          } else {
+            livre = false;
+            vezes = v;
+          }
+          desenha();
+          if (livre) campoNum.focus();
+        },
+      }));
+    }
+    campoNum.style.display = livre ? "" : "none";
+  }
+  desenha();
+
+  return {
+    node: el("div", {}, [chips, campoNum]),
+    // null = indeterminada; erro quando escolheu "outro" e não digitou nada
+    ler() {
+      if (livre && !(Number.isFinite(vezes) && vezes >= 1)) {
+        return { ok: false, erro: "Diga em quantos meses a despesa se repete." };
+      }
+      return { ok: true, vezes };
+    },
+  };
+}
+
+/**
+ * Despesas fixas. A ocorrência nasce quando o mês é aberto, nunca antes: por
+ * isso a lista fala em "próximo lançamento" e não promete nada do futuro.
+ */
+/** Quantos meses ainda vêm, contando o corrente. null = sem fim previsto. */
+function mesesAte(ultimoMes) {
+  if (!ultimoMes) return null;
+  const atual = mesDe(hojeISO());
+  let n = 0;
+  for (let m = atual; m <= ultimoMes && n < 1200; m = mesAdd(m, 1)) n += 1;
+  return n;
+}
+
+function cardFixas() {
+  const s = state.snapshot;
+  const fixas = s.fixas || [];
+  const cats = new Map((s.categories || []).map((c) => [c.id, c]));
+  const formas = new Map((s.payment_methods || []).map((f) => [f.id, f]));
+
+  const corpo = fixas.length
+    ? el("ul", { class: "list" }, fixas.map((f) => {
+        const cat = cats.get(f.category_id);
+        const forma = f.payment_method_id ? formas.get(f.payment_method_id)?.name : null;
+        const restam = mesesAte(f.ultimo_mes);
+        const situacao = f.cancelado_em
+          ? `cancelada a partir de ${mesExtenso(f.cancelado_em)}`
+          : f.total_meses == null
+            ? "até você cancelar"
+            : restam > 0 ? `faltam ${restam} de ${f.total_meses}` : `concluída (${f.total_meses} lançamento${f.total_meses === 1 ? "" : "s"} previstos)`;
+        return el("li", { class: "list__item" }, [
+          el("span", { class: "catrow__dot", style: `background:${cat?.color || "#9ca3af"}` }),
+          el("div", { style: "flex:1;min-width:0" }, [
+            el("div", { class: "list__name", text: f.description || cat?.name || "Despesa fixa" }),
+            el("div", { class: "list__sub", text:
+              `${fmtBRL(f.amount_cents)} · dia ${f.dia} · ${cat?.name || "sem categoria"}${forma ? ` · ${forma}` : ""}` }),
+            el("div", { class: "list__sub" }, [
+              f.ativa ? el("span", { class: "tag tag--fixa", text: "ativa" }) : el("span", { class: "badge badge--off", text: "parada" }),
+              ` ${situacao} · ${f.lancadas} lançada${f.lancadas === 1 ? "" : "s"}`,
+            ]),
+          ]),
+          el("div", { class: "list__actions" }, [
+            el("button", { class: "iconbtn", text: "✏️", title: "Editar", onClick: () => abrirFormFixa(f) }),
+            f.cancelado_em
+              ? el("button", {
+                  class: "iconbtn", text: "▶️", title: "Reativar",
+                  onClick: async () => {
+                    try {
+                      await db.reativarFixa(state.ledgerId, f.id);
+                      await recarregar();
+                      toast("Fixa reativada.", "success");
+                    } catch (e) { toast(e.message, "error"); }
+                  },
+                })
+              : el("button", {
+                  class: "iconbtn", text: "⏸️", title: "Cancelar",
+                  onClick: async () => {
+                    if (!confirmAction(`Parar "${f.description || cat?.name}"? O que já foi lançado continua; ela para de aparecer a partir do mês que vem.`)) return;
+                    try {
+                      await db.cancelarFixa(state.ledgerId, f.id);
+                      await recarregar();
+                      toast("Fixa cancelada. O histórico continua.", "success");
+                    } catch (e) { toast(e.message, "error"); }
+                  },
+                }),
+            el("button", {
+              class: "iconbtn", text: "🗑️", title: "Excluir",
+              onClick: async () => {
+                const aviso = f.lancadas > 0
+                  ? `Excluir a regra "${f.description || cat?.name}"? ${f.lancadas === 1
+                      ? "O lançamento já feito continua"
+                      : `Os ${f.lancadas} lançamentos já feitos continuam`} no histórico; ela só para de lançar.`
+                  : "Excluir esta despesa fixa?";
+                if (!confirmAction(aviso)) return;
+                try {
+                  await db.delFixa(state.ledgerId, f.id, f.lancadas > 0);
+                  await recarregar();
+                  toast("Fixa excluída.", "success");
+                } catch (e) { toast(e.message, "error"); }
+              },
+            }),
+          ]),
+        ]);
+      }))
+    : el("p", { class: "muted small", style: "margin:4px 0 0", text:
+        "Nenhuma despesa fixa. Ao lançar uma despesa, marque “Repetir todo mês”." });
+
+  return el("div", { class: "card" }, [
+    el("h3", { class: "sheet__title", text: "Despesas fixas" }),
+    el("p", { class: "small muted", style: "margin:6px 0 12px", text:
+      "Aluguel, escola, assinatura. Entram sozinhas quando o mês chega — nunca antes, para o relatório não mostrar gasto que ainda não aconteceu." }),
+    corpo,
+  ]);
+}
+
+function abrirFormFixa(f) {
+  const s = state.snapshot;
+  const cats = (s.categories || []).filter((c) => !c.archived || c.id === f.category_id);
+  const formas = (s.payment_methods || []).filter((m) => !m.archived || m.id === f.payment_method_id);
+
+  const descricao = el("input", { class: "input", maxlength: "140", value: f.description || "" });
+  const valor = el("input", { class: "input input--amount", inputmode: "decimal",
+    value: (f.amount_cents / 100).toFixed(2).replace(".", ",") });
+  const dia = el("input", { class: "input", type: "number", min: "1", max: "31", value: String(f.dia) });
+
+  const selCat = el("select", { class: "input" }, cats.map((c) =>
+    el("option", { value: c.id, selected: c.id === f.category_id ? "" : null,
+      text: c.parent_id ? `   ${cats.find((x) => x.id === c.parent_id)?.name || ""} › ${c.name}` : c.name })));
+  const selForma = el("select", { class: "input" }, [
+    el("option", { value: "", text: "não informar" }),
+    ...formas.map((m) => el("option", { value: m.id, selected: m.id === f.payment_method_id ? "" : null, text: m.name })),
+  ]);
+
+  const repeticoes = seletorRepeticoes(f.total_meses);
+
+  const salvar = el("button", { class: "btn btn--primary btn--lg", type: "button", text: "Salvar" });
+  salvar.onclick = async () => {
+    const cents = parseAmountToCents(valor.value);
+    if (!cents) { toast("Informe um valor maior que zero.", "error"); return; }
+    if (cents > MAX_CENTAVOS) { toast("Esse valor é grande demais.", "error"); return; }
+    const d = Number(dia.value);
+    if (!d || d < 1 || d > 31) { toast("O dia precisa estar entre 1 e 31.", "error"); return; }
+    const rep = repeticoes.ler();
+    if (!rep.ok) { toast(rep.erro, "error"); return; }
+    try {
+      await db.updateFixa(state.ledgerId, f.id, descricao.value, cents, selCat.value, d, rep.vezes, selForma.value || null);
+      close();
+      await recarregar();
+      toast("Fixa atualizada. Vale para os próximos lançamentos.", "success");
+    } catch (e) { toast(e.message, "error"); }
+  };
+
+  const { close } = openModal("Editar despesa fixa", el("div", {}, [
+    campo("Descrição", descricao),
+    campo("Valor", valor),
+    campo("Dia do mês", dia, "Mês sem esse dia usa o último dia."),
+    campo("Categoria", selCat),
+    campo("Forma de pagamento", selForma),
+    el("label", { class: "label", text: "Por quantos meses" }), repeticoes.node,
+    el("p", { class: "small muted", style: "margin-top:8px", text:
+      `Já lançou ${f.lancadas} vez${f.lancadas === 1 ? "" : "es"}. Alterar aqui não mexe no que já foi lançado.` }),
+  ]), salvar);
+}
+
 // ---- aba IA ----------------------------------------------------------------
 /**
  * Conecta o Controlaí a uma IA. Dois caminhos:
@@ -1236,6 +1515,8 @@ function abaAjustes() {
         },
       }),
     ]),
+
+    cardFixas(),
 
     el("div", { class: "card" }, [
       el("h3", { class: "sheet__title", text: "Exportar" }),

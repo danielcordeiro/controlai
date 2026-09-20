@@ -61,6 +61,20 @@ controlai.expense         a despesa
   payment_method_id       ← OPCIONAL, ON DELETE SET NULL
   description, created_at, updated_at
   index (ledger_id, spent_on desc)   ← a consulta quente: um mês de uma carteira
+  recurring_id, recurring_month      ← preenchidos só quando veio de uma fixa
+  unique (recurring_id, recurring_month) where recurring_id is not null
+
+controlai.recurring       a despesa fixa — uma REGRA, não lançamentos futuros
+  id, ledger_id
+  description, amount_cents, category_id, payment_method_id
+  dia integer             ← 1..31; mês sem esse dia usa o último
+  mes_inicio text         ← 'AAAA-MM', primeiro mês em que aparece
+  total_meses integer     ← null = indeterminado (até cancelar)
+  cancelado_em text       ← 'AAAA-MM': não gera deste mês em diante
+  created_at
+
+controlai.recurring_skip  "apaguei a ocorrência deste mês"
+  (recurring_id, month_key) pk
 ```
 
 **Centavos inteiros** (convenção herdada do Rachaí): nenhum `float` no caminho do
@@ -73,6 +87,61 @@ lançamento.
 **Arquivar em vez de excluir**: categoria com histórico não pode ser apagada
 (`controlai_del_categoria` recusa e explica). Arquivada, some do formulário e
 continua explicando os meses passados.
+
+### Despesa fixa: geração sob demanda, nunca no futuro
+
+A alternativa óbvia — criar as 12 despesas de uma vez — foi descartada por três
+motivos concretos:
+
+1. **O mês que vem apareceria pré-gasto.** O app existe para responder "quanto
+   gastei", e um outubro com R$ 1.500 de aluguel antes de outubro chegar é uma
+   resposta errada.
+2. **Corrigir o valor viraria um mutirão.** O aluguel reajusta; com lançamentos
+   materializados seria preciso varrer e reescrever cada um.
+3. **"Até eu cancelar" não tem fim** — não existe número de linhas a criar.
+
+Então a ocorrência nasce quando o mês é aberto: `controlai_mes` chama
+`controlai._gerar_fixas(ledger, mes)`, que é a única coisa que materializa
+lançamento de fixa. Ela:
+
+- **retorna imediatamente se o mês pedido é futuro** — a regra que impede o mês
+  que vem de chegar pré-gasto;
+- é **idempotente**: o índice único `(recurring_id, recurring_month)` e a checagem
+  prévia garantem uma ocorrência por fixa por mês, quantas vezes rodar;
+- respeita o **skip**: apagar o lançamento de julho grava `(fixa, '2026-07')` em
+  `recurring_skip`, e julho não volta;
+- **grampeia o dia**: 31 num mês de 30 vira o dia 30, e a ocorrência do mês
+  corrente nunca nasce com data futura (cai em hoje).
+
+Cancelar grava `cancelado_em` = mês que vem, então para de gerar dali em diante
+sem apagar nada. **Reativar** não pode simplesmente limpar essa marca: os meses
+em que a fixa esteve parada viram `recurring_skip` antes, senão a próxima
+abertura do app faria meses já fechados brotarem com lançamentos que nunca
+foram pagos. **Excluir** apaga só a regra e solta as ocorrências
+(`recurring_id` vira nulo): exigir "zero lançamentos" deixaria o botão inútil
+para sempre, porque a ocorrência do mês corrente nasce junto com a fixa.
+
+Duas armadilhas resolvidas na revisão:
+
+- **Mudar a data de uma ocorrência para outro mês.** O lançamento continuaria
+  marcado como "a ocorrência de setembro" estando em agosto: setembro nunca mais
+  seria gerado e agosto ficaria com dois. `controlai._solta_da_fixa` desfaz o
+  vínculo e marca o mês de origem como pulado.
+- **Quem só fala com o app pela IA.** A geração era disparada só por
+  `controlai_mes`, então o conector respondia o total do mês sem nenhuma fixa,
+  e o mesmo mês mudava de valor quando a pessoa abria a tela. Agora
+  `controlai._catchup_fixas` roda também em `contexto`, `resumo` e `listar`, e
+  põe em dia todos os meses pendentes de uma vez — `ledger.fixas_ate` guarda até
+  onde já foi, para não varrer o histórico a cada abertura.
+
+Na tela, os atalhos `3x/6x/12x/24x/até eu cancelar` cobrem o caso comum e
+`outro` abre um campo livre. O campo livre não é luxo: a IA cria fixa com
+qualquer número de meses, e sem ele abrir uma fixa de 7 meses para editar não
+acenderia chip nenhum — a pessoa não saberia dizer o que está valendo.
+
+O preço dessa escolha: quem não abre o app por três meses só vê os três meses
+materializados quando voltar. Como as ocorrências passadas são geradas ao abrir
+cada mês, o histórico fica correto de qualquer forma.
 
 ---
 
@@ -140,8 +209,9 @@ acesso da IA não invalida o seu link, e trocar o link não desconecta a IA.
 ### Por que uma API separada em vez de reusar as RPCs do app
 As RPCs do app falam em `uuid` e centavos. Uma IA recebe *"gastei 62 no mercado"*.
 As `controlai_api_*` falam a língua do meio: **valor em reais**, **categoria pelo
-nome**, data opcional. O casamento de categoria é sem acento e por prefixo
-(`alimentacao`, `morad`), e quando não acha **erra listando as existentes** em vez
+nome**, data opcional. O casamento de categoria é sem acento e por prefixo ou
+trecho (`alimentacao`, `morad`, e `credito` acha "Cartão de crédito"), e quando
+não acha **erra listando as existentes** em vez
 de criar uma nova — categoria nascida de erro de digitação some do relatório e
 estraga justamente o número que o app existe para mostrar.
 
@@ -152,6 +222,10 @@ estraga justamente o número que o app existe para mostrar.
 | `controlai_api_resumo` | total do mês por categoria e por forma, com o mês anterior |
 | `controlai_api_listar` | lançamentos do mês com id, para editar ou apagar |
 | `controlai_api_editar` / `apagar` | alteram só o que foi informado |
+| `controlai_api_criar_fixa` | despesa fixa: `meses` para um número de repetições, omitido para "até cancelar" |
+| `controlai_api_listar_fixas` | as fixas com valor, dia, quantas foram lançadas e se estão ativas |
+| `controlai_api_editar_fixa` | muda a série daqui para frente (`ate_cancelar` tira o prazo) |
+| `controlai_api_cancelar_fixa` | para de lançar do mês que vem; o histórico continua |
 | `controlai_api_criar_categoria` | quando a pessoa realmente quer uma nova |
 | `controlai_get_api_token` / `rotate_api_token` | chamadas pelo app, recebem o uuid da carteira |
 
@@ -171,6 +245,11 @@ https://<ref>.supabase.co/functions/v1/controlai-mcp/ctl_xxxxxxxx
 autenticação é esse token, validado dentro da função pela `controlai._por_token`.
 É a mesma chave portadora do link da carteira, e está escrito na tela que a URL
 deve ser tratada como senha.
+
+As instruções do servidor dizem explicitamente que gasto que se repete todo mês é
+`criar_fixa`, não uma despesa lançada doze vezes — sem isso o modelo tende a
+resolver "todo mês pago 1500 de aluguel" com um laço de `lancar_despesa`, que é
+justamente o que a seção 3 descarta.
 
 Erro de ferramenta volta como `isError` com o texto da exceção, não como erro de
 protocolo — assim o modelo lê *"Categoria X não existe. Disponíveis: ..."* e se
@@ -196,11 +275,13 @@ o arquivo como *Microsoft Excel 2007+* e o `unzip -t` passa sem erro.
 | Função | Para quê |
 |---|---|
 | `controlai_criar(name, email)` | cria a carteira e **semeia** 10 categorias e 5 formas de pagamento, para a pessoa já sair lançando |
-| `controlai_mes(ledger, mes)` | **uma chamada** devolve tudo da tela: carteira, categorias, formas, despesas do mês, total do mês, total do mês anterior e os meses com lançamento |
+| `controlai_mes(ledger, mes)` | **uma chamada** devolve tudo da tela: carteira, categorias, formas, despesas do mês, fixas, total do mês, total do mês anterior e os meses com lançamento. É também o gatilho que materializa as ocorrências das fixas daquele mês |
 | `controlai_meus_ids()` | recuperação (lê o e-mail do JWT) |
 | `controlai_add_despesa` / `update` / `del` | CRUD da despesa, com as validações de posse e de data futura |
 | `controlai_add_categoria` / `update` / `del` | plano de contas (impede subcategoria de subcategoria) |
 | `controlai_add_forma` / `update` / `del` | formas de pagamento |
+| `controlai_add_fixa` / `update_fixa` | cria e edita a despesa fixa (a edição vale daqui para frente) |
+| `controlai_cancelar_fixa` / `reativar_fixa` / `del_fixa` | cancelar para de gerar do mês que vem; reativar não ressuscita o período parado; excluir tira a regra e mantém o histórico |
 | `controlai_renomear` / `set_email` | ajustes da carteira (o e-mail antigo continua valendo) |
 | `controlai_rotacionar_id(ledger)` | troca o uuid: a única revogação possível de um link vazado |
 | `controlai_apagar(ledger, confirmacao)` | exclusão self-service, com o id repetido como confirmação |
@@ -236,7 +317,7 @@ não ganha uma linha redundante repetindo a si mesma.
 
 ## 9. Verificação feita
 
-- `npm test` — 108/108.
+- `npm test` — 162/162 (inclui um leitor de ZIP que confere o CRC32 de cada parte do .xlsx gerado).
 - RPCs testadas via REST com a publishable key (criar, lançar com e sem forma de
   pagamento, snapshot, validações de valor zero, data futura, categoria de outra
   carteira, e-mail inválido, carteira inexistente).
@@ -251,6 +332,27 @@ não ganha uma linha redundante repetindo a si mesma.
   comparação, tela de recuperação e exclusão da carteira. Zero erro no console.
 - Rotação de id e exclusão testadas ponta a ponta (link antigo deixa de abrir,
   dados preservados na rotação; cascata limpa tudo na exclusão).
+- **Despesas fixas**, no banco: uma fixa de 3 meses começando em junho gerou
+  junho, julho e agosto e **parou** — nada em setembro (limite atingido) nem em
+  outubro (futuro); dia 31 caiu em 30/06; rodar a geração de novo não duplicou; e
+  apagar a ocorrência de julho pelo caminho oficial não a fez voltar.
+- **Despesas fixas**, no navegador: criar "Aluguel" de R$ 1.500 no dia 5 "até eu
+  cancelar" lançou a ocorrência de setembro na hora, com o selo `fixa` na lista e
+  a regra em Ajustes com editar, pausar e excluir.
+- **Conector MCP** com as 10 ferramentas: `criar_fixa` (com número de meses e
+  indeterminada), `listar_fixas` e `cancelar_fixa` por `curl` no endpoint
+  publicado; id de outra carteira é recusado.
+- **SQL versionado aplicado do zero** num Postgres 16 limpo, na ordem
+  `schema.sql → fixas.sql → api-ia.sql`, e depois de novo por cima para conferir
+  a idempotência. O teste funcional rodou nesse banco descartável.
+- **Paridade repo × produção**: o md5 do corpo de cada uma das 49 funções (sem
+  comentários nem espaços) bate entre o banco criado a partir dos `.sql`
+  versionados e o banco real. O arquivo não é a intenção, é o que está rodando.
+- **Cenários de fixa conferidos no banco descartável**: mover a ocorrência de
+  setembro para agosto solta da série sem duplicar nem deixar buraco; apagar
+  pelo conector grava o skip; cancelar em junho e reativar mantém junho e julho
+  fora; excluir a regra preserva o lançamento; excluir categoria usada por fixa
+  dá mensagem de gente.
 
 ### O que NÃO foi verificado
 O **recebimento do e-mail de recuperação**. Falta um passo no painel do Supabase
@@ -283,6 +385,29 @@ aderência ao pedido) com verificação cética de cada achado. O que virou corr
 | `＋ nova` categoria descartava o formulário | modal por cima, já seleciona a nova |
 | Sem `role=dialog`, Esc, foco, rótulos, `aria-pressed` | tudo adicionado |
 | `schema.sql` não migrava FK em banco existente | bloco `ALTER` idempotente |
+
+## 10b. Segunda revisão adversarial (despesas fixas)
+
+Cinco revisores por dimensão (SQL, segurança, front, conector, produto) e três
+céticos por achado, cada um com uma lente diferente. Sobreviveram e viraram
+correção:
+
+| Achado | Correção |
+|---|---|
+| Editar a data de uma ocorrência para outro mês duplicava o destino e furava a origem para sempre | `controlai._solta_da_fixa` em `update_despesa` e `api_editar` |
+| Reativar uma fixa fazia os meses parados nascerem retroativamente | reativar grava `recurring_skip` do período parado antes de limpar `cancelado_em` |
+| `resumo` e `listar` da API nunca geravam as fixas: o conector respondia um mês sem elas | `_catchup_fixas` nas três leituras, com marcador `ledger.fixas_ate` |
+| Excluir categoria usada só por uma fixa estourava o erro cru de FK | `del_categoria` checa `controlai.recurring` e explica |
+| O botão de excluir fixa nunca funcionava: a ocorrência do mês nasce junto com ela | excluir solta os lançamentos e preserva o histórico, com confirmação que diz isso |
+
+Achados menores corrigidos no mesmo passo: `api_apagar` não gravava o skip,
+`api_editar` aceitava data futura, o filtro de argumentos do MCP comia `false`,
+`cancelar_fixa` aceitava mês malformado, `del_fixa` consultava sem o id da
+carteira, `update_fixa` não validava `total_meses`, "faltam N" contava
+lançamentos em vez de meses restantes, e o Enter repetido no campo Valor criava
+duas fixas iguais.
+
+---
 
 ## 11. O que ficou fora da v1
 

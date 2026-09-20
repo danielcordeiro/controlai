@@ -30,6 +30,22 @@ A carteira abre em 4 abas:
 - Lançamentos **agrupados por dia**, com o total de cada dia.
 - Toque para **editar** ou **excluir**.
 
+### 🔁 Despesas fixas (recorrentes)
+- No formulário da despesa, marque **Repetir todo mês** e escolha por quantas
+  vezes: `3x`, `6x`, `12x`, `24x`, **outro** (qualquer número até 600) ou
+  **até você cancelar**.
+- A fixa é uma **regra**, não doze lançamentos adiantados: a ocorrência de cada
+  mês nasce quando aquele mês chega. O mês que vem nunca aparece pré-gasto.
+- **Dia 31 em mês de 30** cai no último dia do mês, não vaza para o seguinte.
+- **Apagar a ocorrência de um mês** vale só para aquele mês — a fixa continua e
+  não recria o que você apagou.
+- **Cancelar** para de lançar do mês que vem em diante e preserva o histórico;
+  **reativar** volta a lançar a partir do mês atual, sem ressuscitar os meses
+  em que ela esteve parada. **Excluir** apaga só a regra: os lançamentos já
+  feitos continuam, soltos da série.
+- Mudar o valor vale **daqui para frente**; o que já foi lançado fica como está.
+- A lista fica em **Ajustes**, com editar, pausar/reativar e excluir.
+
 ### 🗂️ Categorias
 - **Plano de contas** de até 2 níveis (ex.: `Alimentação › Restaurante`).
 - Cor por categoria, **arquivar** (some do formulário e preserva o histórico) e excluir.
@@ -38,11 +54,17 @@ A carteira abre em 4 abas:
 ### 🤖 IA
 - **Conector no Claude**: a aba entrega a URL pronta para colar em
   *Customize → Connectors → Add custom connector*. Aí é só falar:
-  *"gastei 62 no mercado hoje"*, *"resumo do mês"*, *"quanto foi em transporte?"*.
+  *"gastei 62 no mercado hoje"*, *"resumo do mês"*, *"quanto foi em transporte?"*,
+  *"todo mês pago 1500 de aluguel"* (isso vira uma fixa, não um lançamento solto),
+  *"sobe o aluguel para 1650"* (edita a série, sem mexer no que já foi lançado).
 - Para **Claude Code, Cursor ou ChatGPT**, um bloco de instruções para colar na
   conversa, que usa a API REST direto.
 - **Token separado do link**: revogar o acesso da IA não derruba o seu link, e
   trocar o link não desconecta a IA.
+
+### ☕ Apoio
+- No fim da aba Mês, um card discreto com a chave **Pix** para quem quiser pagar
+  um café. É opt-in: sem o bloco `PIX` no `config.js`, o card nem aparece.
 
 ### ⚙️ Ajustes
 - Seu **ID/link** de acesso, com botão de copiar.
@@ -79,7 +101,7 @@ A carteira abre em 4 abas:
 
 ```
 index.html            # casca (carrega config.js e o módulo)
-config.js             # URL + publishable key do Supabase (pública por design)
+config.js             # URL + publishable key do Supabase e chave Pix de apoio
 config.example.js     # modelo para quem for clonar
 styles.css            # design system (mobile-first)
 js/
@@ -90,6 +112,7 @@ js/
   xlsx.js             # gerador de .xlsx (ZIP + OOXML), sem dependência
 supabase/
   schema.sql          # tabelas + RPCs + permissões (rodar uma vez)
+  fixas.sql           # despesas fixas: tabelas, geração mês a mês e RPCs
   api-ia.sql          # token e funções da API para IA
   analytics.sql       # relatórios de uso separados dos do Rachaí
   functions/controlai-mcp/   # servidor MCP (Edge Function) do conector
@@ -174,13 +197,16 @@ supabase functions deploy controlai-mcp --no-verify-jwt --project-ref wkuykhomuc
 `--no-verify-jwt` é obrigatório: o claude.ai não manda chave do Supabase, e a
 autenticação é o token `ctl_...` no fim da URL, validado dentro da função.
 
-Ferramentas expostas: `contexto`, `lancar_despesa`, `resumo_do_mes`,
-`listar_despesas`, `editar_despesa`, `apagar_despesa`, `criar_categoria`.
+Ferramentas expostas (11): `contexto`, `lancar_despesa`, `resumo_do_mes`,
+`listar_despesas`, `editar_despesa`, `apagar_despesa`, `criar_fixa`,
+`editar_fixa`, `listar_fixas`, `cancelar_fixa`, `criar_categoria`.
 
 ### Se for clonar em outro projeto Supabase
-Rode `supabase/schema.sql`, depois `supabase/api-ia.sql` e `supabase/analytics.sql`
-(todos idempotentes), publique a Edge Function e preencha o `config.js` a partir
-do `config.example.js`.
+Rode nesta ordem (todos idempotentes): `supabase/schema.sql`,
+`supabase/fixas.sql`, `supabase/api-ia.sql` e `supabase/analytics.sql`. Depois
+publique a Edge Function e preencha o `config.js` a partir do `config.example.js`.
+`fixas.sql` redefine `controlai_mes` e `controlai_del_despesa`, então precisa vir
+depois do `schema.sql`.
 
 ---
 

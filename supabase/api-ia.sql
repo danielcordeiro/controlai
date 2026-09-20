@@ -92,6 +92,12 @@ begin
      order by length(c.name) limit 1;
   end if;
   if v_id is null then
+    select c.id into v_id from controlai.category c
+     where c.ledger_id = p_ledger and not c.archived
+       and controlai.unaccent_simples(c.name) like '%' || controlai.unaccent_simples(v_nome) || '%'
+     order by length(c.name) limit 1;
+  end if;
+  if v_id is null then
     select string_agg(c.name, ', ' order by c.sort_order, c.name) into v_opcoes
       from controlai.category c where c.ledger_id = p_ledger and not c.archived;
     raise exception 'Categoria "%" não existe. Disponíveis: %. Use controlai_api_criar_categoria para criar.', p_nome, v_opcoes;
@@ -116,6 +122,12 @@ begin
        and controlai.unaccent_simples(m.name) like controlai.unaccent_simples(v_nome) || '%'
      order by length(m.name) limit 1;
   end if;
+  if v_id is null then
+    select m.id into v_id from controlai.payment_method m
+     where m.ledger_id = p_ledger and not m.archived
+       and controlai.unaccent_simples(m.name) like '%' || controlai.unaccent_simples(v_nome) || '%'
+     order by length(m.name) limit 1;
+  end if;
   return v_id;   -- não achou: grava sem forma, em vez de recusar o lançamento
 end;
 $$;
@@ -129,6 +141,7 @@ returns json language plpgsql security definer set search_path = controlai, publ
 declare v_ledger uuid;
 begin
   v_ledger := controlai._por_token(p_token);
+  perform controlai._catchup_fixas(v_ledger);
   return json_build_object(
     'carteira', (select l.name from controlai.ledger l where l.id = v_ledger),
     'hoje', to_char((now() at time zone 'America/Sao_Paulo')::date, 'YYYY-MM-DD'),
@@ -189,6 +202,7 @@ returns json language plpgsql security definer set search_path = controlai, publ
 declare v_ledger uuid; v_ini date; v_fim date; v_total bigint; v_ant bigint;
 begin
   v_ledger := controlai._por_token(p_token);
+  perform controlai._catchup_fixas(v_ledger);
   v_ini := controlai._mes_inicio(p_mes);
   v_fim := (v_ini + interval '1 month')::date;
   v_total := controlai._total_mes(v_ledger, v_ini);
@@ -226,6 +240,7 @@ returns json language plpgsql security definer set search_path = controlai, publ
 declare v_ledger uuid; v_ini date; v_fim date; v_cat uuid;
 begin
   v_ledger := controlai._por_token(p_token);
+  perform controlai._catchup_fixas(v_ledger);
   v_ini := controlai._mes_inicio(p_mes);
   v_fim := (v_ini + interval '1 month')::date;
   if coalesce(btrim(p_categoria), '') <> '' then
@@ -236,7 +251,8 @@ begin
              'id', e.id, 'data', to_char(e.spent_on, 'YYYY-MM-DD'),
              'valor', round(e.amount_cents / 100.0, 2),
              'categoria', c.name, 'forma_pagamento', m.name,
-             'descricao', nullif(e.description, ''))
+             'descricao', nullif(e.description, ''),
+             'de_fixa', e.recurring_id is not null)
            order by e.spent_on desc, e.created_at desc)
       from controlai.expense e
       left join controlai.category c on c.id = e.category_id
@@ -262,7 +278,12 @@ begin
   if coalesce(btrim(p_categoria), '') <> '' then
     v_cat := controlai._categoria_por_nome(v_ledger, p_categoria);
   end if;
-  if coalesce(btrim(p_data), '') <> '' then v_data := p_data::date; end if;
+  if coalesce(btrim(p_data), '') <> '' then
+    v_data := p_data::date;
+    if v_data > (now() at time zone 'America/Sao_Paulo')::date + 1 then
+      raise exception 'A data não pode ser no futuro.';
+    end if;
+  end if;
   update controlai.expense
      set amount_cents      = coalesce(v_cents, amount_cents),
          category_id       = coalesce(v_cat, category_id),
@@ -274,18 +295,27 @@ begin
                                   then left(btrim(p_descricao), 140) else description end,
          updated_at        = now()
    where id = p_id and ledger_id = v_ledger;
+  perform controlai._solta_da_fixa(p_id);
   return json_build_object('ok', true, 'id', p_id);
 end;
 $$;
 
 create or replace function public.controlai_api_apagar(p_token text, p_id uuid)
 returns json language plpgsql security definer set search_path = controlai, public, pg_temp as $$
-declare v_ledger uuid;
+declare v_ledger uuid; v_rec uuid; v_mes text;
 begin
   v_ledger := controlai._por_token(p_token);
   perform controlai._pertence(v_ledger, 'expense', p_id);
+  select recurring_id, recurring_month into v_rec, v_mes
+    from controlai.expense where id = p_id;
+  if v_rec is not null and v_mes is not null then
+    insert into controlai.recurring_skip (recurring_id, month_key)
+    values (v_rec, v_mes) on conflict do nothing;
+  end if;
   delete from controlai.expense where id = p_id and ledger_id = v_ledger;
-  return json_build_object('ok', true);
+  return json_build_object('ok', true,
+    'observacao', case when v_rec is null then null
+                       else 'Era a ocorrência de uma despesa fixa: só este mês saiu, a fixa continua.' end);
 end;
 $$;
 
@@ -311,6 +341,173 @@ begin
   return json_build_object('ok', true, 'id', v_id, 'nome', left(v_nome, 40));
 exception when unique_violation then
   raise exception 'Já existe uma categoria com esse nome aqui.';
+end;
+$$;
+
+-- ------------------------------------------------------------ despesas fixas
+-- A IA cria a REGRA, não doze lançamentos: as ocorrências nascem mês a mês
+-- (ver supabase/fixas.sql). Por isso 'criar_fixa' e não um laço de 'lancar'.
+
+-- A assinatura mudou (ganhou p_mes_inicio): sem o drop, o create abaixo viraria
+-- uma sobrecarga e a chamada por nome ficaria ambígua no PostgREST.
+drop function if exists public.controlai_api_criar_fixa(text, numeric, text, integer, integer, text, text);
+
+create or replace function public.controlai_api_criar_fixa(
+  p_token text, p_valor numeric, p_categoria text, p_dia integer default null,
+  p_meses integer default null, p_forma text default null, p_descricao text default null,
+  p_mes_inicio text default null)
+returns json language plpgsql security definer
+set search_path = controlai, public, pg_temp as $$
+declare v_ledger uuid; v_cat uuid; v_forma uuid; v_cents integer; v_id uuid;
+        v_dia integer; v_inicio text; v_atual text;
+begin
+  v_ledger := controlai._por_token(p_token);
+  if p_valor is null or p_valor <= 0 then
+    raise exception 'O valor precisa ser maior que zero.';
+  end if;
+  v_cents := round(p_valor * 100)::integer;
+  if v_cents > 2147483647 then raise exception 'Valor grande demais.'; end if;
+  v_cat   := controlai._categoria_por_nome(v_ledger, p_categoria);
+  v_forma := controlai._forma_por_nome(v_ledger, p_forma);
+  v_atual := to_char((now() at time zone 'America/Sao_Paulo')::date, 'YYYY-MM');
+  v_dia   := coalesce(p_dia, extract(day from (now() at time zone 'America/Sao_Paulo'))::integer);
+  if v_dia < 1 or v_dia > 31 then raise exception 'O dia precisa estar entre 1 e 31.'; end if;
+  if p_meses is not null and p_meses < 1 then
+    raise exception 'A quantidade de meses precisa ser pelo menos 1.';
+  end if;
+  v_inicio := coalesce(nullif(btrim(coalesce(p_mes_inicio, '')), ''), v_atual);
+  if v_inicio !~ '^\d{4}-(0[1-9]|1[0-2])$' then
+    raise exception 'Mês de início inválido (use AAAA-MM).';
+  end if;
+
+  insert into controlai.recurring
+    (ledger_id, description, amount_cents, category_id, payment_method_id, dia, mes_inicio, total_meses)
+  values (v_ledger, left(coalesce(btrim(p_descricao), ''), 140), v_cents, v_cat, v_forma, v_dia,
+          v_inicio, p_meses)
+  returning id into v_id;
+
+  -- põe em dia tudo do mês de início para cá, para a pessoa ver o efeito na hora
+  update controlai.ledger set fixas_ate = null where id = v_ledger;
+  perform controlai._catchup_fixas(v_ledger);
+
+  return json_build_object(
+    'ok', true, 'id', v_id,
+    'descricao', left(coalesce(btrim(p_descricao), ''), 140),
+    'valor', round(v_cents / 100.0, 2),
+    'categoria', (select name from controlai.category where id = v_cat),
+    'forma_pagamento', (select name from controlai.payment_method where id = v_forma),
+    'dia', v_dia,
+    'mes_inicio', v_inicio,
+    'repeticoes', case when p_meses is null then 'até cancelar' else p_meses::text end,
+    'observacao', case when v_inicio > v_atual
+                       then 'Começa no futuro: nada foi lançado ainda.' else null end);
+end;
+$$;
+
+-- Editar pelo conector. Sem isto o único caminho seria cancelar e criar outra,
+-- que duplicaria a ocorrência do mês corrente.
+create or replace function public.controlai_api_editar_fixa(
+  p_token text, p_id uuid, p_valor numeric default null, p_categoria text default null,
+  p_dia integer default null, p_meses integer default null, p_forma text default null,
+  p_descricao text default null, p_ate_cancelar boolean default null)
+returns json language plpgsql security definer
+set search_path = controlai, public, pg_temp as $$
+declare v_ledger uuid; r controlai.recurring; v_cents integer; v_cat uuid; v_meses integer;
+begin
+  v_ledger := controlai._por_token(p_token);
+  select * into r from controlai.recurring where id = p_id and ledger_id = v_ledger;
+  if not found then
+    raise exception 'Esta despesa fixa não é desta carteira.';
+  end if;
+
+  if p_valor is not null then
+    if p_valor <= 0 then raise exception 'O valor precisa ser maior que zero.'; end if;
+    v_cents := round(p_valor * 100)::integer;
+    if v_cents > 2147483647 then raise exception 'Valor grande demais.'; end if;
+  end if;
+  if coalesce(btrim(p_categoria), '') <> '' then
+    v_cat := controlai._categoria_por_nome(v_ledger, p_categoria);
+  end if;
+  if p_dia is not null and (p_dia < 1 or p_dia > 31) then
+    raise exception 'O dia precisa estar entre 1 e 31.';
+  end if;
+  if p_meses is not null and p_meses < 1 then
+    raise exception 'A quantidade de meses precisa ser pelo menos 1.';
+  end if;
+  if coalesce(p_ate_cancelar, false) and p_meses is not null then
+    raise exception 'Escolha uma coisa só: um número de meses OU até cancelar.';
+  end if;
+  -- omitir "meses" mantém o que estava; só 'ate_cancelar' torna indeterminada
+  v_meses := case when coalesce(p_ate_cancelar, false) then null
+                  when p_meses is not null then p_meses
+                  else r.total_meses end;
+
+  update controlai.recurring
+     set amount_cents      = coalesce(v_cents, amount_cents),
+         category_id       = coalesce(v_cat, category_id),
+         dia               = coalesce(p_dia, dia),
+         payment_method_id = case when coalesce(btrim(p_forma), '') <> ''
+                                  then controlai._forma_por_nome(v_ledger, p_forma)
+                                  else payment_method_id end,
+         description       = case when p_descricao is not null
+                                  then left(btrim(p_descricao), 140) else description end,
+         total_meses       = v_meses
+   where id = p_id and ledger_id = v_ledger;
+
+  select * into r from controlai.recurring where id = p_id;
+  return json_build_object(
+    'ok', true, 'id', p_id,
+    'descricao', nullif(r.description, ''),
+    'valor', round(r.amount_cents / 100.0, 2),
+    'categoria', (select name from controlai.category where id = r.category_id),
+    'forma_pagamento', (select name from controlai.payment_method where id = r.payment_method_id),
+    'dia', r.dia,
+    'repeticoes', case when r.total_meses is null then 'até cancelar' else r.total_meses::text end,
+    'observacao', 'Vale para os próximos lançamentos; o que já foi lançado não muda.');
+end;
+$$;
+
+create or replace function public.controlai_api_listar_fixas(p_token text)
+returns json language plpgsql security definer
+set search_path = controlai, public, pg_temp as $$
+declare v_ledger uuid; v_atual text;
+begin
+  v_ledger := controlai._por_token(p_token);
+  v_atual := to_char((now() at time zone 'America/Sao_Paulo')::date, 'YYYY-MM');
+  return coalesce((
+    select json_agg(json_build_object(
+             'id', r.id,
+             'descricao', nullif(r.description, ''),
+             'valor', round(r.amount_cents / 100.0, 2),
+             'categoria', c.name,
+             'forma_pagamento', m.name,
+             'dia', r.dia,
+             'mes_inicio', r.mes_inicio,
+             'repeticoes', case when r.total_meses is null then 'até cancelar' else r.total_meses::text end,
+             'lancadas', (select count(*) from controlai.expense e where e.recurring_id = r.id),
+             'ativa', (r.cancelado_em is null
+                       and (controlai._fixa_ultimo_mes(r) is null or controlai._fixa_ultimo_mes(r) >= v_atual)))
+           order by r.created_at)
+      from controlai.recurring r
+      left join controlai.category c on c.id = r.category_id
+      left join controlai.payment_method m on m.id = r.payment_method_id
+     where r.ledger_id = v_ledger), '[]'::json);
+end;
+$$;
+
+create or replace function public.controlai_api_cancelar_fixa(p_token text, p_id uuid)
+returns json language plpgsql security definer
+set search_path = controlai, public, pg_temp as $$
+declare v_ledger uuid;
+begin
+  v_ledger := controlai._por_token(p_token);
+  if not exists (select 1 from controlai.recurring where id = p_id and ledger_id = v_ledger) then
+    raise exception 'Esta despesa fixa não é desta carteira.';
+  end if;
+  update controlai.recurring
+     set cancelado_em = controlai._mes_add(to_char((now() at time zone 'America/Sao_Paulo')::date, 'YYYY-MM'), 1)
+   where id = p_id and ledger_id = v_ledger;
+  return json_build_object('ok', true, 'observacao', 'Para de lançar a partir do mês que vem; o histórico continua.');
 end;
 $$;
 
