@@ -409,6 +409,37 @@ duas fixas iguais.
 
 ---
 
+## 10c. Limpeza depois da revisão
+
+Uma terceira passada (reuso, simplificação, eficiência, altitude) trocou remendo
+por mecanismo:
+
+- **Uma definição por função.** `fixas.sql` redefinia quatro funções que o
+  `schema.sql` já definia — 144 linhas copiadas por causa de uma a três linhas
+  de diferença, e rodar `schema.sql` sozinho revertia a feature em silêncio.
+  Agora cada função tem um lugar só. Corpo plpgsql não resolve nomes na criação,
+  então `schema.sql` pode chamar o que `fixas.sql` cria depois.
+- **`controlai._hoje()` e `controlai._mes_atual()`.** O `America/Sao_Paulo`
+  tinha virado quatorze expressões iguais; o fuso é constante de negócio e agora
+  mora num lugar só.
+- **A camada de IA delega.** `controlai_api_criar_fixa` resolve nome→uuid e
+  chama `controlai_add_fixa`; `api_cancelar_fixa` chama `controlai_cancelar_fixa`;
+  `api_apagar` chama `controlai_del_despesa`. A regra de negócio deixou de existir
+  em duas versões que divergiriam na primeira mudança.
+- **`acaoUnica(fn)` em `js/ui.js`.** Os formulários ligam o mesmo handler ao
+  clique e ao Enter, e `botao.disabled` não protege o caminho do teclado — um
+  Enter repetido na tela inicial chegava a criar duas carteiras. A guarda agora
+  embrulha os sete handlers, não só o que a revisão pegou.
+- **`mesesEntre` em `js/ui.js`**, testada, no lugar de um laço mês a mês dentro
+  de `app.js`; e `seletorRepeticoes` com um estado só, sem `NaN` de sentinela.
+- **Eficiência**: `_catchup_fixas` sai na primeira leitura quando já está em dia;
+  criar fixa não invalida mais o marcador da carteira inteira (passa o mês de
+  início); `_gerar_fixas` deixou a pré-checagem redundante para o índice único;
+  `controlai_mes` calcula `_fixa_ultimo_mes` uma vez por linha, não três; e as
+  FKs novas de `recurring` ganharam índice no lado filho.
+
+---
+
 ## 11. O que ficou fora da v1
 
 Orçamento/meta por categoria, despesa recorrente, receitas (o app é só de

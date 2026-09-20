@@ -144,6 +144,18 @@ end;
 $$;
 
 -- Primeiro dia do mês a partir de 'YYYY-MM' (ou do mês corrente se vier vazio).
+-- O fuso é constante de negócio. Estes dois são a única fonte: sem eles o
+-- 'America/Sao_Paulo' se espalha por dezenas de expressões iguais.
+create or replace function controlai._hoje()
+returns date language sql stable set search_path = pg_temp as $$
+  select (now() at time zone 'America/Sao_Paulo')::date;
+$$;
+
+create or replace function controlai._mes_atual()
+returns text language sql stable set search_path = controlai, pg_temp as $$
+  select to_char(controlai._hoje(), 'YYYY-MM');
+$$;
+
 create or replace function controlai._mes_inicio(p_mes text)
 returns date
 language plpgsql
@@ -152,7 +164,7 @@ set search_path = controlai, public, pg_temp
 as $$
 begin
   if coalesce(btrim(p_mes), '') = '' then
-    return date_trunc('month', (now() at time zone 'America/Sao_Paulo'))::date;
+    return date_trunc('month', controlai._hoje())::date;
   end if;
   if p_mes !~ '^\d{4}-\d{2}$' then
     raise exception 'Mês inválido (use AAAA-MM).';
@@ -305,6 +317,9 @@ begin
      set last_seen_at = now()
    where id = v_ledger and last_seen_at < now() - interval '1 hour';
 
+  -- abrir o app é o gatilho que materializa as ocorrências das fixas (fixas.sql)
+  perform controlai._catchup_fixas(v_ledger);
+
   select json_build_object(
     'ledger', (select json_build_object('id', l.id, 'name', l.name, 'email', l.email,
                                         'currency', l.currency, 'created_at', l.created_at)
@@ -325,10 +340,25 @@ begin
         select json_agg(json_build_object('id', e.id, 'spent_on', to_char(e.spent_on, 'YYYY-MM-DD'),
                                           'amount_cents', e.amount_cents, 'category_id', e.category_id,
                                           'payment_method_id', e.payment_method_id,
-                                          'description', e.description)
+                                          'description', e.description,
+                                          'recurring_id', e.recurring_id)
                         order by e.spent_on desc, e.created_at desc)
           from controlai.expense e
          where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim), '[]'::json),
+    'fixas', coalesce((
+        select json_agg(json_build_object(
+                 'id', r.id, 'description', r.description, 'amount_cents', r.amount_cents,
+                 'category_id', r.category_id, 'payment_method_id', r.payment_method_id,
+                 'dia', r.dia, 'mes_inicio', r.mes_inicio, 'total_meses', r.total_meses,
+                 'cancelado_em', r.cancelado_em,
+                 'ultimo_mes', u.ultimo,
+                 'lancadas', (select count(*) from controlai.expense e where e.recurring_id = r.id),
+                 'ativa', (r.cancelado_em is null
+                           and (u.ultimo is null or u.ultimo >= controlai._mes_atual())))
+               order by r.created_at)
+          from controlai.recurring r
+          cross join lateral (select controlai._fixa_ultimo_mes(r) as ultimo) u
+         where r.ledger_id = v_ledger), '[]'::json),
     'total_cents',      controlai._total_mes(v_ledger, v_ini),
     'total_anterior',   controlai._total_mes(v_ledger, (v_ini - interval '1 month')::date),
     'meses_com_gasto', coalesce((
@@ -392,7 +422,7 @@ begin
   if p_spent_on is null then
     raise exception 'Informe a data da despesa.';
   end if;
-  if p_spent_on > (now() at time zone 'America/Sao_Paulo')::date + 1 then
+  if p_spent_on > controlai._hoje() + 1 then
     raise exception 'A data não pode ser no futuro.';
   end if;
   -- a categoria PRECISA ser desta carteira (evita gravar em carteira alheia)
@@ -434,7 +464,7 @@ begin
   if p_spent_on is null then
     raise exception 'Informe a data da despesa.';
   end if;
-  if p_spent_on > (now() at time zone 'America/Sao_Paulo')::date + 1 then
+  if p_spent_on > controlai._hoje() + 1 then
     raise exception 'A data não pode ser no futuro.';
   end if;
   perform controlai._pertence(v_ledger, 'category', p_category);
@@ -449,6 +479,8 @@ begin
          description = left(coalesce(btrim(p_description), ''), 140),
          updated_at = now()
    where id = p_expense and ledger_id = v_ledger;
+  -- mudou de mês? deixa de ser a ocorrência daquele mês da fixa (ver fixas.sql)
+  perform controlai._solta_da_fixa(p_expense);
 end;
 $$;
 
@@ -458,10 +490,17 @@ language plpgsql
 security definer
 set search_path = controlai, public, pg_temp
 as $$
-declare v_ledger uuid;
+declare v_ledger uuid; v_rec uuid; v_mes text;
 begin
   v_ledger := controlai._ledger_ok(p_ledger);
   perform controlai._pertence(v_ledger, 'expense', p_expense);
+  -- veio de fixa? apagar vale só para este mês; sem o skip ela renasceria
+  select recurring_id, recurring_month into v_rec, v_mes
+    from controlai.expense where id = p_expense;
+  if v_rec is not null and v_mes is not null then
+    insert into controlai.recurring_skip (recurring_id, month_key)
+    values (v_rec, v_mes) on conflict do nothing;
+  end if;
   delete from controlai.expense where id = p_expense and ledger_id = v_ledger;
 end;
 $$;
@@ -542,6 +581,9 @@ begin
   perform controlai._pertence(v_ledger, 'category', p_category);
   if exists (select 1 from controlai.expense where category_id = p_category) then
     raise exception 'Esta categoria já tem despesas. Arquive-a em vez de excluir (o histórico continua).';
+  end if;
+  if exists (select 1 from controlai.recurring where category_id = p_category) then
+    raise exception 'Esta categoria está numa despesa fixa. Mude a fixa de categoria ou exclua a fixa antes.';
   end if;
   if exists (select 1 from controlai.category where parent_id = p_category) then
     raise exception 'Esta categoria tem subcategorias. Exclua ou mova as subcategorias antes.';
@@ -750,6 +792,8 @@ to anon, authenticated;
 
 -- As funções internas do schema controlai não são chamáveis de fora.
 revoke all on function controlai._email_ok(text)          from anon, authenticated, public;
+revoke all on function controlai._hoje()                  from anon, authenticated, public;
+revoke all on function controlai._mes_atual()             from anon, authenticated, public;
 revoke all on function controlai._mes_inicio(text)        from anon, authenticated, public;
 revoke all on function controlai._ledger_ok(uuid)         from anon, authenticated, public;
 revoke all on function controlai._total_mes(uuid, date)   from anon, authenticated, public;

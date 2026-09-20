@@ -106,6 +106,19 @@ export function mesDe(dataISO) {
 }
 
 /** Soma (ou subtrai) meses a "YYYY-MM". mesAdd("2026-01", -1) => "2025-12". */
+/**
+ * Quantos meses de `de` até `ate`, contando os dois. Aritmética, não laço:
+ * a mesma conta que mesAdd faz por dentro.
+ */
+export function mesesEntre(de, ate) {
+  const n = (m) => {
+    const [y, mm] = String(m).split("-").map(Number);
+    return y && mm ? y * 12 + mm : NaN;
+  };
+  const d = n(de), a = n(ate);
+  return Number.isFinite(d) && Number.isFinite(a) ? a - d + 1 : 0;
+}
+
 export function mesAdd(mes, delta) {
   const [y, m] = String(mes).split("-").map(Number);
   if (!y || !m) return mes;
@@ -226,4 +239,23 @@ export function downloadText(filename, text, mime = "text/csv;charset=utf-8") {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/**
+ * Embrulha um handler assíncrono para que a segunda chamada seja ignorada
+ * enquanto a primeira ainda está no ar. Necessário porque os formulários
+ * ligam o mesmo handler ao clique E ao Enter: desabilitar o botão não protege
+ * o caminho do teclado, e um Enter repetido chegava a criar duas carteiras.
+ */
+export function acaoUnica(fn) {
+  let rodando = false;
+  return async function (...args) {
+    if (rodando) return;
+    rodando = true;
+    try {
+      return await fn.apply(this, args);
+    } finally {
+      rodando = false;
+    }
+  };
 }

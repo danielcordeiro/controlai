@@ -5,4 +5,9 @@
 window.CONTROLAI_CONFIG = {
   SUPABASE_URL: "https://SUA_REF.supabase.co",
   SUPABASE_ANON_KEY: "SUA_PUBLISHABLE_OU_ANON_KEY",
+
+  // Opcional: card "me paga um café" no fim da aba Mês. Sem este bloco, o card
+  // não aparece. Use `key` para uma chave Pix avulsa ou `payload` para um
+  // Pix copia e cola completo (payload tem prioridade).
+  // PIX: { key: "SUA_CHAVE_PIX", name: "Apoie o Controlaí" },
 };

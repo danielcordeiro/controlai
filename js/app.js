@@ -4,7 +4,7 @@ import { db, auth, isConfigured, chegouDoEmail, erroDoEmail } from "./db.js";
 import {
   el, clear, fmtBRL, fmtBRLCurto, parseAmountToCents, toast, confirmAction, copyText,
   hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct,
-  downloadText, downloadBytes, MAX_CENTAVOS,
+  downloadText, downloadBytes, MAX_CENTAVOS, mesesEntre, acaoUnica,
 } from "./ui.js";
 import {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
@@ -210,7 +210,7 @@ function renderHome() {
   const email = el("input", { class: "input", type: "email", placeholder: "voce@email.com", inputmode: "email", autocomplete: "email" });
   const btn = el("button", { class: "btn btn--primary btn--lg", text: "Criar minha carteira" });
 
-  const criar = async () => {
+  const criar = acaoUnica(async () => {
     const n = nome.value.trim();
     const e = email.value.trim();
     if (!e || !e.includes("@")) {
@@ -231,7 +231,7 @@ function renderHome() {
       btn.disabled = false;
       btn.textContent = "Criar minha carteira";
     }
-  };
+  });
   btn.addEventListener("click", criar);
   email.addEventListener("keydown", (ev) => { if (ev.key === "Enter") criar(); });
 
@@ -296,7 +296,7 @@ async function renderRecuperar() {
   const email = el("input", { class: "input", type: "email", placeholder: "voce@email.com", inputmode: "email", autocomplete: "email" });
   const btn = el("button", { class: "btn btn--primary btn--lg", text: "Enviar link para meu e-mail" });
 
-  const enviar = async () => {
+  const enviar = acaoUnica(async () => {
     const e = email.value.trim();
     if (!e || !e.includes("@")) { toast("Informe um e-mail válido.", "error"); email.focus(); return; }
     btn.disabled = true;
@@ -310,7 +310,7 @@ async function renderRecuperar() {
       btn.disabled = false;
       btn.textContent = "Enviar link para meu e-mail";
     }
-  };
+  });
   btn.addEventListener("click", enviar);
   email.addEventListener("keydown", (ev) => { if (ev.key === "Enter") enviar(); });
 
@@ -329,7 +329,7 @@ function renderConfirmarCodigo(email) {
   const codigo = el("input", { class: "input input--code", inputmode: "numeric", maxlength: "8", placeholder: "000000", autocomplete: "one-time-code" });
   const btn = el("button", { class: "btn btn--primary btn--lg", text: "Confirmar código" });
 
-  const confirmar = async () => {
+  const confirmar = acaoUnica(async () => {
     const c = codigo.value.trim();
     if (c.length < 6) { toast("Digite o código de 6 dígitos do e-mail.", "error"); return; }
     btn.disabled = true;
@@ -342,7 +342,7 @@ function renderConfirmarCodigo(email) {
       btn.disabled = false;
       btn.textContent = "Confirmar código";
     }
-  };
+  });
   btn.addEventListener("click", confirmar);
   codigo.addEventListener("keydown", (ev) => { if (ev.key === "Enter") confirmar(); });
 
@@ -844,7 +844,7 @@ function abrirFormDespesa(despesa) {
    *  fechar o formulário jogaria fora valor, data e descrição já digitados. */
   function criarCategoriaNoFormulario() {
     const nome = el("input", { class: "input", placeholder: "Ex.: Pet, Viagem, Presentes", maxlength: "40" });
-    const salvarCat = async () => {
+    const salvarCat = acaoUnica(async () => {
       const texto = nome.value.trim();
       if (!texto) { toast("Dê um nome para a categoria.", "error"); nome.focus(); return; }
       try {
@@ -861,7 +861,7 @@ function abrirFormDespesa(despesa) {
         toast(`Categoria "${texto}" criada e escolhida.`, "success");
         recarregar();   // sincroniza o resto da tela em segundo plano
       } catch (e) { toast(e.message, "error"); }
-    };
+    });
     nome.addEventListener("keydown", (ev) => { if (ev.key === "Enter") salvarCat(); });
     const { close: fecharCat } = openModal(
       "Nova categoria",
@@ -892,9 +892,7 @@ function abrirFormDespesa(despesa) {
 
   const btnSalvar = el("button", { class: "btn btn--primary btn--lg", text: editando ? "Salvar" : "Lançar despesa" });
 
-  let salvando = false;
-  const salvar = async () => {
-    if (salvando) return;   // Enter repetido chega aqui sem passar pelo botão
+  const salvar = acaoUnica(async () => {
     const cents = parseAmountToCents(valor.value);
     if (!cents) { toast("Informe um valor maior que zero.", "error"); valor.focus(); return; }
     if (cents > MAX_CENTAVOS) {
@@ -906,7 +904,6 @@ function abrirFormDespesa(despesa) {
     if (!data.value) { toast("Informe a data.", "error"); return; }
     const rep = repetir ? repeticoes.ler() : { ok: true, vezes: null };
     if (!rep.ok) { toast(rep.erro, "error"); return; }
-    salvando = true;
     btnSalvar.disabled = true;
     btnSalvar.textContent = "Salvando...";
     try {
@@ -930,11 +927,10 @@ function abrirFormDespesa(despesa) {
         : "Despesa lançada.", "success");
     } catch (err) {
       toast(err.message, "error");
-      salvando = false;
       btnSalvar.disabled = false;
       btnSalvar.textContent = editando ? "Salvar" : "Lançar despesa";
     }
-  };
+  });
   btnSalvar.addEventListener("click", salvar);
   valor.addEventListener("keydown", (ev) => { if (ev.key === "Enter") salvar(); });
 
@@ -985,7 +981,7 @@ function abaPlano() {
   const pais = cats.filter((c) => !c.parent_id);
   const novo = el("input", { class: "input", placeholder: "Nova categoria", maxlength: "40" });
 
-  const criar = async () => {
+  const criar = acaoUnica(async () => {
     const nome = novo.value.trim();
     if (!nome) return;
     try {
@@ -994,7 +990,7 @@ function abaPlano() {
       await recarregar();
       toast("Categoria criada.", "success");
     } catch (e) { toast(e.message, "error"); }
-  };
+  });
   novo.addEventListener("keydown", (ev) => { if (ev.key === "Enter") criar(); });
 
   const linhas = [];
@@ -1091,7 +1087,7 @@ function cardFormas() {
   const formas = s.payment_methods || [];
   const novo = el("input", { class: "input", placeholder: "Nova forma de pagamento", maxlength: "40" });
 
-  const criar = async () => {
+  const criar = acaoUnica(async () => {
     const nome = novo.value.trim();
     if (!nome) return;
     try {
@@ -1100,7 +1096,7 @@ function cardFormas() {
       await recarregar();
       toast("Forma de pagamento criada.", "success");
     } catch (e) { toast(e.message, "error"); }
-  };
+  });
   novo.addEventListener("keydown", (ev) => { if (ev.key === "Enter") criar(); });
 
   return el("div", { class: "card" }, [
@@ -1161,8 +1157,10 @@ function abrirFormForma(f) {
  */
 function seletorRepeticoes(inicial) {
   const PADRAO = [3, 6, 12, 24];
-  let vezes = inicial === undefined ? 12 : inicial;   // null = até cancelar
-  let livre = vezes !== null && !PADRAO.includes(vezes);
+  const ini = inicial === undefined ? 12 : inicial;
+  // uma variável só: um dos atalhos, null (até cancelar) ou "livre".
+  // O número do campo livre mora no próprio input, lido só na hora de salvar.
+  let escolha = ini === null || PADRAO.includes(ini) ? ini : "livre";
 
   const chips = el("div", { class: "chips" });
   const campoNum = el("input", {
@@ -1170,35 +1168,24 @@ function seletorRepeticoes(inicial) {
     class: "input", style: "max-width:10rem;margin-top:8px",
     placeholder: "quantos meses", "aria-label": "Quantas vezes repetir",
   });
-  if (livre) campoNum.value = String(vezes);
-  campoNum.addEventListener("input", () => {
-    const n = parseInt(campoNum.value, 10);
-    vezes = Number.isFinite(n) && n >= 1 ? Math.min(n, 600) : NaN;
-  });
+  if (escolha === "livre") campoNum.value = String(ini);
 
   function desenha() {
     clear(chips);
     for (const [v, rotulo] of [[3, "3x"], [6, "6x"], [12, "12x"], [24, "24x"],
                                ["livre", "outro"], [null, "até eu cancelar"]]) {
-      const on = v === "livre" ? livre : (!livre && vezes === v);
+      const on = v === escolha;
       chips.append(el("button", {
         class: `chip ${on ? "chip--on" : ""}`, type: "button", text: rotulo,
         "aria-pressed": on ? "true" : "false",
         onClick: () => {
-          if (v === "livre") {
-            livre = true;
-            const n = parseInt(campoNum.value, 10);
-            vezes = Number.isFinite(n) && n >= 1 ? n : NaN;
-          } else {
-            livre = false;
-            vezes = v;
-          }
+          escolha = v;
           desenha();
-          if (livre) campoNum.focus();
+          if (v === "livre") campoNum.focus();
         },
       }));
     }
-    campoNum.style.display = livre ? "" : "none";
+    campoNum.style.display = escolha === "livre" ? "" : "none";
   }
   desenha();
 
@@ -1206,10 +1193,10 @@ function seletorRepeticoes(inicial) {
     node: el("div", {}, [chips, campoNum]),
     // null = indeterminada; erro quando escolheu "outro" e não digitou nada
     ler() {
-      if (livre && !(Number.isFinite(vezes) && vezes >= 1)) {
-        return { ok: false, erro: "Diga em quantos meses a despesa se repete." };
-      }
-      return { ok: true, vezes };
+      if (escolha !== "livre") return { ok: true, vezes: escolha };
+      const n = parseInt(campoNum.value, 10);
+      if (!(n >= 1)) return { ok: false, erro: "Diga em quantos meses a despesa se repete." };
+      return { ok: true, vezes: Math.min(n, 600) };
     },
   };
 }
@@ -1219,13 +1206,8 @@ function seletorRepeticoes(inicial) {
  * isso a lista fala em "próximo lançamento" e não promete nada do futuro.
  */
 /** Quantos meses ainda vêm, contando o corrente. null = sem fim previsto. */
-function mesesAte(ultimoMes) {
-  if (!ultimoMes) return null;
-  const atual = mesDe(hojeISO());
-  let n = 0;
-  for (let m = atual; m <= ultimoMes && n < 1200; m = mesAdd(m, 1)) n += 1;
-  return n;
-}
+const mesesAte = (ultimoMes) =>
+  ultimoMes ? Math.max(0, mesesEntre(mesDe(hojeISO()), ultimoMes)) : null;
 
 function cardFixas() {
   const s = state.snapshot;
@@ -1329,7 +1311,7 @@ function abrirFormFixa(f) {
   const repeticoes = seletorRepeticoes(f.total_meses);
 
   const salvar = el("button", { class: "btn btn--primary btn--lg", type: "button", text: "Salvar" });
-  salvar.onclick = async () => {
+  salvar.onclick = acaoUnica(async () => {
     const cents = parseAmountToCents(valor.value);
     if (!cents) { toast("Informe um valor maior que zero.", "error"); return; }
     if (cents > MAX_CENTAVOS) { toast("Esse valor é grande demais.", "error"); return; }
@@ -1343,7 +1325,7 @@ function abrirFormFixa(f) {
       await recarregar();
       toast("Fixa atualizada. Vale para os próximos lançamentos.", "success");
     } catch (e) { toast(e.message, "error"); }
-  };
+  });
 
   const { close } = openModal("Editar despesa fixa", el("div", {}, [
     campo("Descrição", descricao),

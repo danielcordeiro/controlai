@@ -3,7 +3,7 @@
 
 import {
   parseAmountToCents, fmtBRL, hojeISO, mesDe, mesAdd, mesExtenso, mesCurto,
-  dataCurta, diasNoMes, variacaoPct, MAX_CENTAVOS,
+  dataCurta, diasNoMes, variacaoPct, MAX_CENTAVOS, mesesEntre, acaoUnica,
 } from "../js/ui.js";
 
 let falhas = 0;
@@ -18,9 +18,11 @@ function ok(cond, nome, extra = "") {
 function eq(actual, expected, nome) {
   ok(Object.is(actual, expected), nome, `esperado ${JSON.stringify(expected)}, veio ${JSON.stringify(actual)}`);
 }
+const pendentes = [];   // grupos que devolvem promise (testes assíncronos)
 function grupo(nome, fn) {
   console.log(`\n${nome}`);
-  fn();
+  const r = fn();
+  if (r && typeof r.then === "function") pendentes.push(r);
 }
 
 // ---------------------------------------------------------------- dinheiro
@@ -52,6 +54,22 @@ grupo("fmtBRL", () => {
   }
 });
 
+// ------------------------------------------------------- guarda de envio duplo
+grupo("acaoUnica", () => {
+  let chamadas = 0;
+  let libera;
+  const espera = new Promise((r) => { libera = r; });
+  const fn = acaoUnica(async () => { chamadas++; await espera; return chamadas; });
+  const primeira = fn();
+  fn(); fn();                             // dois disparos com a primeira em voo
+  eq(chamadas, 1, "só a primeira chamada roda enquanto está no ar");
+  libera();
+  // depois que a primeira termina, uma nova chamada volta a passar
+  return primeira.then(() => fn()).then(() => {
+    eq(chamadas, 2, "volta a aceitar depois que a anterior termina");
+  });
+});
+
 // ---------------------------------------------------------------- meses
 grupo("mesAdd / mesDe / mesExtenso", () => {
   eq(mesDe("2026-09-19"), "2026-09", "mês de uma data");
@@ -60,6 +78,20 @@ grupo("mesAdd / mesDe / mesExtenso", () => {
   eq(mesAdd("2026-01", -1), "2025-12", "vira o ano para trás");
   eq(mesAdd("2026-09", -12), "2025-09", "um ano atrás");
   eq(mesAdd("2026-09", 0), "2026-09", "delta zero");
+  // mesesEntre: conta os dois extremos — é o "faltam N" das despesas fixas
+  eq(mesesEntre("2026-09", "2026-09"), 1, "mesmo mês conta 1");
+  eq(mesesEntre("2026-09", "2026-12"), 4, "setembro a dezembro");
+  eq(mesesEntre("2026-11", "2027-02"), 4, "atravessa o ano");
+  eq(mesesEntre("2026-09", "2027-09"), 13, "um ano inteiro mais o corrente");
+  eq(mesesEntre("2026-10", "2026-09"), 0, "fim antes do início não é negativo");
+  eq(mesesEntre("lixo", "2026-09"), 0, "entrada inválida vira 0");
+  // bate com a contagem por laço, que é a definição
+  for (let k = 0; k < 30; k++) {
+    let m = "2026-01", n = 0;
+    const fim = mesAdd("2026-01", k);
+    while (m <= fim) { n++; m = mesAdd(m, 1); }
+    eq(mesesEntre("2026-01", fim), n, `mesesEntre bate com o laço em +${k}`);
+  }
   eq(mesExtenso("2026-09"), "setembro de 2026", "mês por extenso");
   eq(mesExtenso("2026-03"), "março de 2026", "acento preservado");
   eq(mesCurto("2026-09"), "set/26", "mês curto");
@@ -319,6 +351,7 @@ grupo("xlsx — planilha das despesas", () => {
 });
 
 // ---------------------------------------------------------------- resultado
+await Promise.all(pendentes);
 console.log(`\n${total - falhas}/${total} verificações passaram.`);
 if (falhas) {
   console.error(`${falhas} falha(s).`);

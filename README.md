@@ -113,6 +113,7 @@ js/
 supabase/
   schema.sql          # tabelas + RPCs + permissões (rodar uma vez)
   fixas.sql           # despesas fixas: tabelas, geração mês a mês e RPCs
+                      # (roda depois do schema.sql, que já chama o que ele cria)
   api-ia.sql          # token e funções da API para IA
   analytics.sql       # relatórios de uso separados dos do Rachaí
   functions/controlai-mcp/   # servidor MCP (Edge Function) do conector
@@ -205,8 +206,8 @@ Ferramentas expostas (11): `contexto`, `lancar_despesa`, `resumo_do_mes`,
 Rode nesta ordem (todos idempotentes): `supabase/schema.sql`,
 `supabase/fixas.sql`, `supabase/api-ia.sql` e `supabase/analytics.sql`. Depois
 publique a Edge Function e preencha o `config.js` a partir do `config.example.js`.
-`fixas.sql` redefine `controlai_mes` e `controlai_del_despesa`, então precisa vir
-depois do `schema.sql`.
+A ordem importa: `schema.sql` cria funções que chamam o que `fixas.sql` define
+depois (corpo plpgsql não resolve nomes na criação, então isso é válido).
 
 ---
 
