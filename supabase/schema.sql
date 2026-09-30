@@ -70,6 +70,21 @@ create index if not exists category_parent_idx on controlai.category (parent_id)
 create unique index if not exists category_nome_unq
   on controlai.category (ledger_id, coalesce(parent_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(name));
 
+-- Limite de gasto do mês: o total ou uma categoria de 1º nível. Vigência
+-- mensal: a linha vale de mes_inicio em diante, até a próxima do mesmo alvo, e
+-- cada mês passado guarda o limite que tinha (ver controlai._limites). A
+-- remoção é uma linha com limite nulo: apagar a linha faria o limite do mês
+-- anterior voltar a valer.
+create table if not exists controlai.limite (
+  id           uuid primary key default gen_random_uuid(),   -- o update em cascata do rotacionar_id precisa de replica identity
+  ledger_id    uuid not null references controlai.ledger(id) on update cascade on delete cascade,
+  category_id  uuid references controlai.category(id) on delete cascade,   -- null = total do mês
+  mes_inicio   text not null check (mes_inicio ~ '^\d{4}-(0[1-9]|1[0-2])$'),
+  limite_cents integer check (limite_cents > 0),                            -- null = removido deste mês em diante
+  unique nulls not distinct (ledger_id, category_id, mes_inicio)
+);
+create index if not exists limite_categoria_idx on controlai.limite (category_id);
+
 -- Forma de pagamento (opcional na despesa).
 create table if not exists controlai.payment_method (
   id         uuid primary key default gen_random_uuid(),
@@ -121,6 +136,7 @@ alter table controlai.category       enable row level security;
 alter table controlai.payment_method enable row level security;
 alter table controlai.expense        enable row level security;
 alter table controlai.ledger_email   enable row level security;
+alter table controlai.limite         enable row level security;
 
 -- ============================================================================
 -- Helpers internos (schema controlai, NÃO expostos)
@@ -201,6 +217,20 @@ as $$
    where ledger_id = p_ledger
      and spent_on >= p_inicio
      and spent_on <  (p_inicio + interval '1 month')::date;
+$$;
+
+-- Os limites vigentes num mês: por alvo, a linha de maior mes_inicio <= mês.
+-- O filtro do nulo vem DEPOIS do distinct on: antes, o tombstone sumiria e o
+-- limite removido voltaria a valer. Mês futuro usa o vigente hoje.
+create or replace function controlai._limites(p_ledger uuid, p_mes text)
+returns table(category_id uuid, limite_cents integer)
+language sql stable set search_path = controlai, pg_temp as $$
+  select v.category_id, v.limite_cents
+    from (select distinct on (l.category_id) l.category_id, l.limite_cents
+            from controlai.limite l
+           where l.ledger_id = p_ledger and l.mes_inicio <= p_mes
+           order by l.category_id, l.mes_inicio desc) v
+   where v.limite_cents is not null;
 $$;
 
 -- A data de uma linha pode ser esta? Uma regra só para o app e para a IA:
@@ -335,6 +365,8 @@ $$;
 -- pendentes da carteira inteira e as que vão pedir confirmação no mês que vem.
 -- Mês futuro não tem linha de série gravada: 'previstas' traz o que as séries
 -- vão lançar nele (em mês corrente ou passado, vem vazio).
+-- 'orcamento' são as linhas de controlai._orcamento, o total primeiro: limite,
+-- livre, projeção e média por dia vêm prontos do servidor (fixas.sql).
 create or replace function public.controlai_mes(p_ledger uuid, p_mes text default null)
 returns json
 language plpgsql
@@ -422,6 +454,8 @@ begin
                  order by e.spent_on, e.created_at limit 200) p
           left join controlai.recurring r on r.id = p.recurring_id), '[]'::json),
     'proximas', controlai._previstas(v_ledger, controlai._mes_add(controlai._mes_atual(), 1), true),
+    'orcamento', (select json_agg(o order by o.category_id nulls first)
+                    from controlai._orcamento(v_ledger, to_char(v_ini, 'YYYY-MM')) o),
     'total_cents',      controlai._total_mes(v_ledger, v_ini),
     'total_anterior',   controlai._total_mes(v_ledger, (v_ini - interval '1 month')::date),
     'meses_com_gasto', coalesce((
@@ -646,6 +680,35 @@ begin
 end;
 $$;
 
+-- Limites do mês -------------------------------------------------------------
+-- Sem categoria é o total. Vale do mês atual em diante; mudar de novo no mesmo
+-- mês substitui. Limite nulo remove (grava o tombstone, ver controlai.limite).
+-- Categoria arquivada é aceita, para dar para remover o limite dela.
+create or replace function public.controlai_set_limite(
+  p_ledger uuid, p_category uuid default null, p_limite_cents integer default null)
+returns void
+language plpgsql
+security definer
+set search_path = controlai, public, pg_temp
+as $$
+declare v_ledger uuid;
+begin
+  v_ledger := controlai._ledger_ok(p_ledger);
+  if p_category is not null then
+    perform controlai._pertence(v_ledger, 'category', p_category);
+    if exists (select 1 from controlai.category where id = p_category and parent_id is not null) then
+      raise exception 'Limite vale para a categoria principal (as subcategorias somam nela).';
+    end if;
+  end if;
+  if p_limite_cents <= 0 then
+    raise exception 'O limite precisa ser maior que zero (vazio remove).';
+  end if;
+  insert into controlai.limite (ledger_id, category_id, mes_inicio, limite_cents)
+  values (v_ledger, p_category, controlai._mes_atual(), p_limite_cents)
+  on conflict (ledger_id, category_id, mes_inicio) do update set limite_cents = excluded.limite_cents;
+end;
+$$;
+
 -- Formas de pagamento ---------------------------------------------------------
 create or replace function public.controlai_add_forma(p_ledger uuid, p_name text)
 returns uuid
@@ -834,6 +897,7 @@ grant execute on function
   public.controlai_add_categoria(uuid, text, uuid, text),
   public.controlai_update_categoria(uuid, uuid, text, text, boolean),
   public.controlai_del_categoria(uuid, uuid),
+  public.controlai_set_limite(uuid, uuid, integer),
   public.controlai_add_forma(uuid, text),
   public.controlai_update_forma(uuid, uuid, text, boolean),
   public.controlai_del_forma(uuid, uuid),
@@ -851,5 +915,6 @@ revoke all on function controlai._mes_atual()             from anon, authenticat
 revoke all on function controlai._mes_inicio(text)        from anon, authenticated, public;
 revoke all on function controlai._ledger_ok(uuid)         from anon, authenticated, public;
 revoke all on function controlai._total_mes(uuid, date)   from anon, authenticated, public;
+revoke all on function controlai._limites(uuid, text)     from anon, authenticated, public;
 revoke all on function controlai._pertence(uuid, text, uuid) from anon, authenticated, public;
 revoke all on function controlai._data_ok(date, date, boolean) from anon, authenticated, public;

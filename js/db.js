@@ -165,6 +165,11 @@ export const db = {
       p_apagar_lancamentos: !!apagarLancamentos,
     }),
 
+  // ---- limite do mês --------------------------------------------------------
+  /** categoryId nulo = total do mês; cents nulo remove. Vale do mês atual em diante. */
+  setLimite: (ledgerId, categoryId, cents) =>
+    rpc("controlai_set_limite", { p_ledger: ledgerId, p_category: categoryId || null, p_limite_cents: cents ?? null }),
+
   // ---- plano de contas ------------------------------------------------------
   addCategoria: (ledgerId, name, parentId, color) =>
     rpc("controlai_add_categoria", { p_ledger: ledgerId, p_name: name, p_parent: parentId || null, p_color: color || null }),

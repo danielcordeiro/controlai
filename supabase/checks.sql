@@ -1,10 +1,11 @@
 -- ============================================================================
--- Controlaí — checks das fixas, parcelados e contas a pagar
+-- Controlaí — checks das fixas, parcelados, contas a pagar e limites do mês
 --
 -- Asserts para um Postgres DESCARTÁVEL (nunca o Supabase: cria carteiras).
 -- Tudo roda dentro de begin ... rollback e nada depende da data de hoje: os
--- meses saem de _mes_atual()/_hoje() e _mes_add. A primeira falha para tudo
--- com "FALHOU: ..."; no fim sai "checks ok: N".
+-- meses saem de _mes_atual()/_hoje() e _mes_add, e as contas do orçamento
+-- (controlai._orcamento) rodam num mês fixo com p_hoje fixo. A primeira falha
+-- para tudo com "FALHOU: ..."; no fim sai "checks ok: N".
 --
 -- Como rodar (Postgres 16 local):
 --   1. banco novo:  create database controlai_teste;
@@ -555,6 +556,303 @@ begin
                      and (select fixas_ate from controlai.ledger where id = v_l) = v_atual,
                      'início no limite: 240 meses num catch-up só, sem rebobinar fixas_ate');
   raise notice '9. estender série e início antigo: ok';
+end $$;
+
+-- 10. Limites: gravação, vigência e recusas -----------------------------------
+do $$
+declare
+  v_l     uuid := pg_temp.carteira();
+  v_l2    uuid := pg_temp.carteira();
+  v_t     text := public.controlai_get_api_token(v_l);
+  v_mor   uuid := pg_temp.cat(v_l, 'Moradia');
+  v_ali   uuid := pg_temp.cat(v_l, 'Alimentação');
+  v_atual text := controlai._mes_atual();
+  v_ant   text := controlai._mes_add(controlai._mes_atual(), -1);
+  v_sub uuid; v_nova uuid; v_novo uuid; v_n integer; j json;
+begin
+  v_sub := public.controlai_add_categoria(v_l, 'Aluguel', v_mor);
+
+  -- mudar de novo no mesmo mês é upsert, inclusive no total (category_id nulo)
+  perform public.controlai_set_limite(v_l, null, 100000);
+  perform public.controlai_set_limite(v_l, null, 120000);
+  perform public.controlai_set_limite(v_l, v_mor, 50000);
+  perform public.controlai_set_limite(v_l, v_mor, 60000);
+  perform pg_temp.ok((select count(*) from controlai.limite where ledger_id = v_l) = 2
+                     and (select limite_cents from controlai.limite
+                           where ledger_id = v_l and category_id is null and mes_inicio = v_atual) = 120000
+                     and (select limite_cents from controlai.limite
+                           where ledger_id = v_l and category_id = v_mor and mes_inicio = v_atual) = 60000,
+                     'upsert no mesmo mês deixa uma linha por alvo');
+
+  -- vigência: M-1 guarda o seu, M e o futuro usam o de M, antes do primeiro nada
+  insert into controlai.limite (ledger_id, category_id, mes_inicio, limite_cents) values (v_l, null, v_ant, 90000), (v_l, v_ali, v_ant, 30000);
+  perform pg_temp.ok((select limite_cents from controlai._limites(v_l, v_ant) where category_id is null) = 90000
+                     and (select limite_cents from controlai._limites(v_l, v_atual) where category_id is null) = 120000
+                     and (select limite_cents from controlai._limites(v_l, controlai._mes_add(v_atual, 5))
+                           where category_id is null) = 120000,
+                     'vigência: M-1 guarda o limite que tinha; M e o futuro usam o de M');
+  perform pg_temp.ok(not exists (select 1 from controlai._limites(v_l, controlai._mes_add(v_atual, -2))),
+                     'antes do primeiro limite não há limite');
+  perform pg_temp.ok((select limite_cents from controlai._limites(v_l, v_atual) where category_id = v_ali) = 30000,
+                     'o limite de M-1 continua valendo em M');
+
+  -- remover grava o tombstone: o de M-1 não volta a valer em M
+  perform public.controlai_set_limite(v_l, v_ali, null);
+  perform pg_temp.ok(not exists (select 1 from controlai._limites(v_l, v_atual) where category_id = v_ali)
+                     and (select limite_cents from controlai._limites(v_l, v_ant) where category_id = v_ali) = 30000
+                     and exists (select 1 from controlai.limite where ledger_id = v_l and category_id = v_ali
+                                    and mes_inicio = v_atual and limite_cents is null),
+                     'o tombstone não ressuscita o limite anterior e o mês passado fica como estava');
+
+  perform pg_temp.falha(format('select public.controlai_set_limite(%L, %L, 1000)', v_l, v_sub), 'categoria principal');
+  perform pg_temp.falha(format('select public.controlai_set_limite(%L, %L, 1000)', v_l2, v_mor), 'não é desta carteira');
+  perform pg_temp.falha(format('select public.controlai_set_limite(%L, null, 0)', v_l), 'maior que zero');
+  perform pg_temp.falha(format('select public.controlai_set_limite(%L, %L, -5)', v_l, v_mor), 'maior que zero');
+  perform pg_temp.falha(format('select public.controlai_api_definir_limite(%L, -10)', v_t), '0 remove');
+  perform pg_temp.falha(format('select public.controlai_api_definir_limite(%L, null)', v_t), '0 remove');
+  perform pg_temp.falha(format('select public.controlai_api_definir_limite(%L, 1e20)', v_t), 'Valor grande demais');
+  perform pg_temp.falha(format('select public.controlai_api_definir_limite(%L, 10, ''Aluguel'')', v_t),
+                        'categoria principal');
+  perform pg_temp.ok((select count(*) from controlai.limite where ledger_id in (v_l, v_l2)) = 5,
+                     'as recusas não gravam nada');
+
+  -- categoria arquivada aceita limite, para dar para remover o dela
+  perform public.controlai_update_categoria(v_l, v_ali, 'Alimentação', null, true);
+  perform public.controlai_set_limite(v_l, v_ali, 40000);
+  perform pg_temp.ok((select limite_cents from controlai._limites(v_l, v_atual) where category_id = v_ali) = 40000,
+                     'categoria arquivada aceita limite');
+  -- e a IA também tira o dela: _categoria_por_nome só acha as ativas
+  j := public.controlai_api_definir_limite(v_t, 0, 'alimentacao');
+  perform pg_temp.ok(j->>'categoria' = 'Alimentação'
+                     and not exists (select 1 from controlai._limites(v_l, v_atual) where category_id = v_ali),
+                     'a IA remove o limite de categoria arquivada');
+
+  -- pela IA: categoria pelo nome, 0 remove, sem categoria é o total
+  j := public.controlai_api_definir_limite(v_t, 800, 'moradia');
+  perform pg_temp.ok(j->>'categoria' = 'Moradia' and (j->>'limite')::numeric = 800 and j->>'a_partir_de' = v_atual
+                     and j->'situacao'->>'categoria' = 'Moradia' and (j->'situacao'->>'limite')::numeric = 800
+                     and (select limite_cents from controlai._limites(v_l, v_atual) where category_id = v_mor) = 80000,
+                     'api_definir_limite pelo nome da categoria, com a situação');
+  j := public.controlai_api_definir_limite(v_t, 0, 'Moradia');
+  perform pg_temp.ok((j->>'ok')::boolean and j->>'limite' is null and j->>'situacao' is null
+                     and not exists (select 1 from controlai._limites(v_l, v_atual) where category_id = v_mor),
+                     '0 pela IA remove');
+  j := public.controlai_api_definir_limite(v_t, 1500.5);
+  perform pg_temp.ok(j->>'categoria' is null and (j->'situacao'->>'limite')::numeric = 1500.5
+                     and (select limite_cents from controlai._limites(v_l, v_atual) where category_id is null) = 150050,
+                     'sem categoria, a IA define o total');
+
+  -- rotacionar o id leva os limites; excluir a categoria e apagar a carteira também
+  select count(*) into v_n from controlai.limite where ledger_id = v_l;
+  v_novo := public.controlai_rotacionar_id(v_l);
+  perform pg_temp.ok(v_n > 0 and (select count(*) from controlai.limite where ledger_id = v_novo) = v_n
+                     and not exists (select 1 from controlai.limite where ledger_id = v_l),
+                     'rotacionar_id leva os limites junto');
+  v_nova := public.controlai_add_categoria(v_novo, 'Viagem');
+  perform public.controlai_set_limite(v_novo, v_nova, 1000);
+  perform public.controlai_del_categoria(v_novo, v_nova);
+  perform pg_temp.ok(not exists (select 1 from controlai.limite where category_id = v_nova),
+                     'del_categoria leva o limite junto');
+  perform public.controlai_apagar(v_novo, v_novo);
+  perform pg_temp.ok(not exists (select 1 from controlai.limite where ledger_id = v_novo),
+                     'apagar a carteira leva os limites');
+
+  perform pg_temp.ok(has_function_privilege('anon', 'public.controlai_set_limite(uuid, uuid, integer)', 'execute')
+                     and has_function_privilege('anon', 'public.controlai_api_definir_limite(text, numeric, text)', 'execute')
+                     and not has_function_privilege('anon', 'controlai._limites(uuid, text)', 'execute')
+                     and not has_function_privilege('anon', 'controlai._orcamento(uuid, text, date)', 'execute')
+                     and not has_table_privilege('anon', 'controlai.limite', 'select')
+                     and (select relrowsecurity from pg_class where oid = 'controlai.limite'::regclass),
+                     'limites: RPCs liberadas, internas e tabela fechadas, RLS ligada');
+  raise notice '10. limites, vigência e recusas: ok';
+end $$;
+
+-- 11. Números do orçamento, num mês fixo -------------------------------------
+-- Junho/2025 (30 dias) com p_hoje fixo. Série de R$ 1.500 em Moradia (a pagar:
+-- conta igual), R$ 40 direto em Alimentação e R$ 30 na subcategoria dela.
+-- Limites: total R$ 1.700 desde janeiro; Moradia R$ 1.500, Alimentação R$ 50
+-- e Lazer R$ 200 (sem gasto) desde junho.
+do $$
+declare
+  v_l   uuid := pg_temp.carteira();
+  v_mor uuid := pg_temp.cat(v_l, 'Moradia');
+  v_ali uuid := pg_temp.cat(v_l, 'Alimentação');
+  v_laz uuid := pg_temp.cat(v_l, 'Lazer');
+  v_m   text := '2025-06';
+  v_sub uuid; v_f uuid; t record;
+begin
+  v_sub := public.controlai_add_categoria(v_l, 'Restaurante', v_ali);
+  insert into controlai.recurring (ledger_id, description, amount_cents, category_id, dia, mes_inicio, total_meses)
+  values (v_l, 'Aluguel', 150000, v_mor, 5, v_m, 1) returning id into v_f;
+  perform controlai._gerar_fixas(v_l, v_m);
+  update controlai.expense set a_pagar = true where recurring_id = v_f;
+  insert into controlai.expense (ledger_id, spent_on, amount_cents, category_id)
+  values (v_l, '2025-06-03', 4000, v_ali), (v_l, '2025-06-06', 3000, v_sub);
+  insert into controlai.limite (ledger_id, category_id, mes_inicio, limite_cents) values (v_l, null, '2025-01', 170000), (v_l, v_mor, v_m, 150000),
+                                      (v_l, v_ali, v_m, 5000), (v_l, v_laz, v_m, 20000);
+
+  -- mês corrente, dia 7
+  select * into t from controlai._orcamento(v_l, v_m, '2025-06-07') where category_id is null;
+  perform pg_temp.ok(t.gasto_cents = controlai._total_mes(v_l, '2025-06-01') and t.gasto_cents = 157000
+                     and t.serie_cents = 150000 and t.limite_cents = 170000,
+                     'o gasto do total é o _total_mes, com a série a pagar');
+  perform pg_temp.ok(t.previsto_cents = 0 and exists (select 1 from controlai._ocorrencias(v_l, v_m, v_m)),
+                     'mês corrente com série ativa: previsto 0');
+  perform pg_temp.ok(t.projecao_cents = 180000,
+                     format('projeção no dia 7 = 150000 + 7000 × 30 / 7 (veio %s)', t.projecao_cents));
+  perform pg_temp.ok(t.livre_cents = 13000 and t.livre_dia_cents = 541,
+                     format('livre por dia com floor: 13000 / 24 = 541 (veio %s/%s)', t.livre_cents, t.livre_dia_cents));
+  perform pg_temp.ok(t.media_dia_cents = 6000, format('média no dia 7 (veio %s)', t.media_dia_cents));
+  perform pg_temp.ok((select count(*) from controlai._orcamento(v_l, v_m, '2025-06-07')) = 4
+                     and not exists (select 1 from controlai._orcamento(v_l, v_m, '2025-06-07')
+                                      where category_id = v_sub),
+                     'uma linha de total e uma por categoria limitada, nenhuma de subcategoria');
+  select * into t from controlai._orcamento(v_l, v_m, '2025-06-07') where category_id = v_ali;
+  perform pg_temp.ok(t.gasto_cents = (select sum(amount_cents) from controlai.expense
+                                       where ledger_id = v_l and category_id in (v_ali, v_sub))
+                     and t.gasto_cents = 7000 and t.serie_cents = 0,
+                     'o rollup do pai é as filhas mais o lançamento direto no pai');
+  perform pg_temp.ok(t.livre_cents = -2000 and t.livre_dia_cents = 0
+                     and t.projecao_cents is null and t.media_dia_cents is null,
+                     'categoria que passou: livre negativo, 0 por dia, sem projeção nem média');
+  select * into t from controlai._orcamento(v_l, v_m, '2025-06-07') where category_id = v_laz;
+  perform pg_temp.ok(t.gasto_cents = 0 and t.serie_cents = 0 and t.previsto_cents = 0
+                     and t.livre_cents = 20000 and t.livre_dia_cents = 833,
+                     'categoria limitada sem gasto aparece com 0');
+  perform pg_temp.ok((select livre_cents from controlai._orcamento(v_l, v_m, '2025-06-07')
+                       where category_id = v_mor) = 0,
+                     'chegar exatamente no limite deixa livre 0, não negativo');
+
+  -- dia 6: ainda sem projeção; a média é arredondada (6166,67)
+  select * into t from controlai._orcamento(v_l, v_m, '2025-06-06') where category_id is null;
+  perform pg_temp.ok(t.projecao_cents is null and t.media_dia_cents = 6167 and t.livre_dia_cents = 520,
+                     format('dia 6: sem projeção (veio %s/%s/%s)', t.projecao_cents, t.media_dia_cents, t.livre_dia_cents));
+
+  -- mês passado
+  select * into t from controlai._orcamento(v_l, v_m, '2025-07-15') where category_id is null;
+  perform pg_temp.ok(t.projecao_cents is null and t.media_dia_cents = 5233 and t.livre_dia_cents is null
+                     and t.previsto_cents = 0 and t.livre_cents = 13000,
+                     'mês passado: sem projeção nem livre por dia, média = gasto / dias, previsto 0');
+
+  -- mês futuro: as linhas reais mais as ocorrências
+  select * into t from controlai._orcamento(v_l, v_m, '2025-05-20') where category_id is null;
+  perform pg_temp.ok(t.previsto_cents = (select sum(amount_cents) from controlai._ocorrencias(v_l, v_m, v_m))
+                     and t.previsto_cents = 150000 and t.livre_cents = 170000 - 157000 - 150000
+                     and t.projecao_cents is null and t.media_dia_cents is null and t.livre_dia_cents is null,
+                     'mês futuro: previsto = _ocorrencias, sem projeção, média nem livre por dia');
+  perform pg_temp.ok((select previsto_cents from controlai._orcamento(v_l, v_m, '2025-05-20')
+                       where category_id = v_mor) = 150000
+                     and (select previsto_cents from controlai._orcamento(v_l, v_m, '2025-05-20')
+                           where category_id = v_ali) = 0,
+                     'mês futuro: o previsto cai na categoria da série');
+
+  -- antes do primeiro limite: só a linha de total, sem limite
+  select * into t from controlai._orcamento(v_l, '2024-12', '2024-12-10');
+  perform pg_temp.ok((select count(*) from controlai._orcamento(v_l, '2024-12', '2024-12-10')) = 1
+                     and t.category_id is null and t.limite_cents is null and t.livre_cents is null
+                     and t.livre_dia_cents is null and t.gasto_cents = 0,
+                     'sem limite: só o total, com limite, livre e livre por dia nulos');
+  raise notice '11. números do orçamento: ok';
+end $$;
+
+-- 12. Paridade app × IA, lancar com limites e busca por nome -------------------
+-- api_resumo.orcamento (reais) × 100 = controlai_mes.orcamento (centavos), alvo a alvo
+create function pg_temp.paridade(p_ledger uuid, p_token text, p_mes text) returns boolean language sql as $$
+  with app as (select x from json_array_elements(public.controlai_mes(p_ledger, p_mes)->'orcamento') x),
+       ia  as (select public.controlai_api_resumo(p_token, p_mes)->'orcamento' as o),
+       par as (select i.o as y, a.x from ia i join app a on a.x->>'category_id' is null
+               union all
+               select k, a.x from ia i
+                cross join lateral json_array_elements(i.o->'categorias') k
+                join controlai.category c on c.ledger_id = p_ledger and c.name = k->>'categoria'
+                join app a on a.x->>'category_id' = c.id::text)
+  select (select count(*) from par) = (select count(*) from app)
+     and (select json_array_length(o->'categorias') from ia) = (select count(*) from app) - 1
+     and bool_and((y->>'limite')::numeric * 100 is not distinct from (x->>'limite_cents')::numeric
+              and (y->>'gasto')::numeric * 100 = (x->>'gasto_cents')::numeric
+              and (y->>'fixas_e_parcelas')::numeric * 100 = (x->>'serie_cents')::numeric
+              and (y->>'comprometido')::numeric * 100 = (x->>'previsto_cents')::numeric
+              and (y->>'livre')::numeric * 100 is not distinct from (x->>'livre_cents')::numeric
+              and (y->>'livre_por_dia')::numeric * 100 is not distinct from (x->>'livre_dia_cents')::numeric
+              and (y->>'projecao')::numeric * 100 is not distinct from (x->>'projecao_cents')::numeric
+              and (y->>'media_por_dia')::numeric * 100 is not distinct from (x->>'media_dia_cents')::numeric)
+    from par;
+$$;
+
+do $$
+declare
+  v_l     uuid := pg_temp.carteira();
+  v_l2    uuid := pg_temp.carteira();
+  v_t     text := public.controlai_get_api_token(v_l);
+  v_t2    text := public.controlai_get_api_token(v_l2);
+  v_mor   uuid := pg_temp.cat(v_l, 'Moradia');
+  v_ali   uuid := pg_temp.cat(v_l, 'Alimentação');
+  v_laz   uuid := pg_temp.cat(v_l, 'Lazer');
+  v_atual text := controlai._mes_atual();
+  v_f uuid; v_top uuid; j json; x json;
+begin
+  v_f := public.controlai_add_fixa(v_l, 'Aluguel', 150000, v_mor, 1);
+  perform public.controlai_add_fixa(v_l, 'Feira', 10000, v_ali, 1);
+  perform public.controlai_set_limite(v_l, null, 300000);
+  perform public.controlai_set_limite(v_l, v_ali, 50000);
+  perform public.controlai_set_limite(v_l, v_laz, 10000);
+  perform public.controlai_add_despesa(v_l, controlai._hoje(), 2500, v_ali);
+
+  j := public.controlai_mes(v_l, v_atual);
+  x := j->'orcamento'->0;
+  perform pg_temp.ok(json_array_length(j->'orcamento') = 3 and x->>'category_id' is null
+                     and (x->>'gasto_cents')::bigint = (j->>'total_cents')::bigint
+                     and (x->>'limite_cents')::integer = 300000
+                     and (select count(*) from json_object_keys(x)) = 9,
+                     'controlai_mes.orcamento: o total primeiro, gasto = total_cents, as 9 chaves');
+  perform pg_temp.ok(pg_temp.paridade(v_l, v_t, v_atual), 'paridade app × IA no mês corrente');
+  perform pg_temp.ok(pg_temp.paridade(v_l, v_t, controlai._mes_add(v_atual, 1)), 'paridade app × IA no mês futuro');
+  perform pg_temp.ok(pg_temp.paridade(v_l, v_t, controlai._mes_add(v_atual, -1)),
+                     'paridade app × IA no mês passado, sem limite');
+
+  x := public.controlai_api_resumo(v_t)->'orcamento';
+  perform pg_temp.ok((select count(*) from json_object_keys(x)) = 11
+                     and (select count(*) from json_object_keys(x->'categorias'->0)) = 8
+                     and (x->>'fixas_e_parcelas')::numeric = 1600 and not (x->>'passou')::boolean
+                     and x->'categorias'->0->>'categoria' = 'Alimentação',
+                     'api_resumo.orcamento: as chaves do contrato e a ordem por consumo');
+  x := public.controlai_api_resumo(v_t2)->'orcamento';
+  perform pg_temp.ok(x->>'limite' is null and x->>'livre' is null and x->>'livre_por_dia' is null
+                     and x->>'passou' is null and x->>'vai_passar' is null
+                     and json_array_length(x->'categorias') = 0 and x->>'gasto' is not null,
+                     'api_resumo sem limite: limite, livre e passou nulos');
+
+  -- virada do mês sem abrir o app: a fixa do mês ainda não está gravada, e o
+  -- lancar põe em dia antes de calcular o livre
+  delete from controlai.expense where recurring_id = v_f;
+  update controlai.ledger set fixas_ate = controlai._mes_add(v_atual, -1) where id = v_l;
+  j := public.controlai_api_lancar(v_t, 150, 'Lazer');
+  perform pg_temp.ok(json_array_length(j->'limites') = 2
+                     and j->'limites'->0->>'alvo' = 'total' and j->'limites'->1->>'alvo' = 'Lazer'
+                     and (j->'limites'->1->>'limite')::numeric = 100 and (j->'limites'->1->>'livre')::numeric = -50
+                     and (j->'limites'->1->>'passou')::boolean
+                     and (j->'limites'->0->>'livre')::numeric = 3000 - 1500 - 100 - 25 - 150,
+                     'lancar devolve limites: o total (com a fixa do mês) e a categoria lançada, com passou');
+  perform public.controlai_add_categoria(v_l, 'Padaria', v_ali);
+  j := public.controlai_api_lancar(v_t, 5, 'Padaria');
+  perform pg_temp.ok(json_array_length(j->'limites') = 2 and j->'limites'->1->>'alvo' = 'Alimentação'
+                     and (j->'limites'->1->>'livre')::numeric = 500 - 100 - 25 - 5,
+                     'lancar em subcategoria devolve o limite do pai');
+  j := public.controlai_api_lancar(v_t, 1, 'Moradia');
+  perform pg_temp.ok(json_array_length(j->'limites') = 1 and j->'limites'->0->>'alvo' = 'total',
+                     'lancar em categoria sem limite: só o total');
+  perform pg_temp.ok(json_array_length(public.controlai_api_lancar(v_t2, 1, 'Moradia')->'limites') = 0,
+                     'lancar em carteira sem limite: limites vazio');
+  x := public.controlai_api_resumo(v_t)->'orcamento';
+  perform pg_temp.ok(x->'categorias'->0->>'categoria' = 'Lazer' and (x->'categorias'->0->>'passou')::boolean,
+                     'api_resumo: quem passou vem primeiro');
+
+  -- o mesmo nome em subcategoria e em categoria: a busca exata prefere o 1º
+  -- nível, mesmo com a subcategoria criada antes
+  perform public.controlai_add_categoria(v_l, 'Viagem', v_laz);
+  v_top := public.controlai_add_categoria(v_l, 'Viagem');
+  perform pg_temp.ok(controlai._categoria_por_nome(v_l, 'viagem') = v_top, 'a busca exata prefere o 1º nível');
+  raise notice '12. paridade, lancar e busca por nome: ok';
 end $$;
 
 select 'checks ok: ' || current_setting('checks.n') as resultado;

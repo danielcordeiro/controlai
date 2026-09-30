@@ -18,7 +18,7 @@
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-const VERSAO = "1.3.0";
+const VERSAO = "1.4.0";
 const PROTOCOLO_PADRAO = "2025-06-18";
 
 const CORS = {
@@ -54,7 +54,9 @@ const FERRAMENTAS: Ferramenta[] = [
     name: "lancar_despesa",
     description:
       "Lança uma despesa. Valor em reais (62.90, não centavos). A categoria é pelo NOME e aceita sem acento ou abreviada " +
-      "('alimentacao', 'morad'). Data no formato AAAA-MM-DD; se omitida, usa hoje. Forma de pagamento é opcional.",
+      "('alimentacao', 'morad'). Data no formato AAAA-MM-DD; se omitida, usa hoje. Forma de pagamento é opcional. " +
+      "O retorno traz 'limites': o total do mês e a categoria lançada, só os que têm limite ('livre', 'passou'); " +
+      "se vier 'limites', diga quanto ficou livre.",
     rpc: "controlai_api_lancar",
     inputSchema: {
       type: "object",
@@ -82,6 +84,11 @@ const FERRAMENTAS: Ferramenta[] = [
       "O total inclui as parcelas a pagar que vencem no mês; 'pago' e 'a_pagar' dividem esse total. Em mês futuro, " +
       "'comprometido' é o que as fixas e os parcelados já preveem para ele ('comprometido_a_confirmar' é a parte que " +
       "vai pedir confirmação de pagamento) e não há comparação com o mês anterior. " +
+      "O bloco 'orcamento' é o limite do mês: 'limite' (nulo sem limite), 'gasto', 'fixas_e_parcelas', 'comprometido' " +
+      "(mês futuro), 'livre', 'livre_por_dia', 'projecao' (só no mês corrente, a partir do dia 7), 'media_por_dia', " +
+      "'passou', 'vai_passar' e 'categorias', com o mesmo para cada categoria que tem limite. É a resposta para " +
+      "'quanto ainda posso gastar?' e 'vou estourar?'. NUNCA extrapole o total por conta própria: fixas e parcelas " +
+      "já estão lançadas desde o dia 1; use orcamento.projecao. " +
       "Mês no formato AAAA-MM; se omitido, o mês corrente. É a resposta para 'para onde foi meu dinheiro?'.",
     rpc: "controlai_api_resumo",
     inputSchema: {
@@ -90,6 +97,25 @@ const FERRAMENTAS: Ferramenta[] = [
       required: [],
     },
     mapa: { mes: "p_mes" },
+  },
+  {
+    name: "definir_limite",
+    description:
+      "Define o limite de gasto do mês: sem 'categoria' é o do total; com ela, o de uma categoria principal (as " +
+      "subcategorias somam nela). Vale deste mês em diante; os meses passados guardam o limite que tinham. O limite " +
+      "conta tudo o que entra no total do mês (pagas e a pagar, avulsas, fixas e parcelas) e nunca impede um " +
+      "lançamento, só informa. valor 0 remove o limite. Devolve a 'situacao' do alvo no mesmo formato de " +
+      "resumo_do_mes.orcamento.",
+    rpc: "controlai_api_definir_limite",
+    inputSchema: {
+      type: "object",
+      properties: {
+        valor: { type: "number", description: "Limite em reais, ex.: 3000. 0 remove o limite." },
+        categoria: { type: "string", description: "Categoria principal, pelo nome. Omita para o total do mês." },
+      },
+      required: ["valor"],
+    },
+    mapa: { valor: "p_valor", categoria: "p_categoria" },
   },
   {
     name: "listar_despesas",
@@ -425,7 +451,9 @@ async function trata(msg: Record<string, unknown>, token: string): Promise<unkno
             "(cada parcela nasce a pagar); no cartão as parcelas já nascem pagas. 'Paguei X' é 'contas_a_pagar' para " +
             "achar o id e 'marcar_pago' nele. 'O que falta pagar?' é 'contas_a_pagar'. Quitar um parcelado é " +
             "'cancelar_fixa', 'apagar_despesa' em cada parcela pendente que a quitação cobre e 'lancar_despesa' com o " +
-            "valor pago. Para mudar uma fixa use 'editar_fixa': cancelar e criar outra duplicaria o lançamento deste mês.",
+            "valor pago. Para mudar uma fixa use 'editar_fixa': cancelar e criar outra duplicaria o lançamento deste mês. " +
+            "'Quanto ainda posso gastar?' e 'vou estourar?' é 'resumo_do_mes', bloco orcamento; nunca extrapole o " +
+            "total por conta própria. 'Limite de X para Y' é 'definir_limite' (sem categoria, o total do mês).",
         },
       };
     }

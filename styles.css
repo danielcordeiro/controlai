@@ -132,6 +132,31 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
 /* mês futuro: comprometido, não gasto — mesmo lugar, outra cara */
 .total--futuro { background: var(--card); color: var(--ink); border: 2px dashed var(--brand); }
 .total--futuro .total__value { color: var(--brand-dark); }
+/* limite: barra em duas partes (fixas e parcelas + dia a dia). Sobre o fundo da
+   marca a parte "cinza" é branco translúcido e o dia a dia é branco, senão some */
+.total .total__track { display: flex; background: rgba(255, 255, 255, .22); margin: 12px 0 2px; }
+.total__track .catrow__fill { border-radius: 0; }
+.total__fill--serie { background: rgba(255, 255, 255, .55); }
+.total__fill--dia { background: #fff; }
+.total--futuro .total__track { background: #eceef1; }
+.total--futuro .total__fill--serie { background: #9ca3af; }
+.total--futuro .total__fill--dia { background: var(--brand); }
+.total__alerta { color: #fcd34d; font-weight: 700; }
+/* vermelho direto no índigo não se lê: vira selo branco */
+.total .apagar__atraso { display: inline-block; background: #fff; border-radius: 8px; padding: 1px 8px; }
+.total__link {
+  display: inline-block; margin-top: 4px; padding: 8px 0; min-height: 36px;
+  background: none; border: 0; color: inherit; font: inherit; font-size: 13px; font-weight: 700;
+  text-decoration: underline; cursor: pointer;
+}
+.total__link:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* ---- card e folha "Limites" ---- */
+.limites { margin-bottom: 14px; }
+.limrow { display: grid; grid-template-columns: minmax(0, 1fr) 8.5rem; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.limrow__nome { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14.5px; }
+.limrow__nome span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.limrow .input { text-align: right; }
 
 /* ---- card "A pagar" (global) ---- */
 .apagar {

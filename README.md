@@ -21,10 +21,20 @@ A carteira abre em 4 abas:
 - **Total do mês** e comparação com o mês anterior ("18% a mais que agosto").
   Quando há parcela a pagar, o total se divide em **Pago · A pagar**.
 - **Cartões de resumo:** nº de lançamentos, média por dia, maior categoria e
-  **projeção do mês** (no mês corrente). Só o gasto avulso é extrapolado; fixas
-  e parcelas entram uma vez.
+  **projeção do mês** (no mês corrente, a partir do dia 7). Só o gasto avulso é
+  extrapolado; fixas e parcelas entram uma vez. A conta é do servidor, a mesma
+  que a IA lê.
+- **Limite do mês**, para o total e para cada categoria principal (as
+  subcategorias somam nela). Conta tudo o que entra no total: pagas e a pagar,
+  avulsas, fixas e parcelas. No card do total, uma barra em duas partes (fixas e
+  parcelas × dia a dia), quanto está livre, "até R$ X/dia" e, a partir do dia 7,
+  onde o mês fecha no ritmo atual. O card **Limites** mostra cada categoria
+  limitada — quem passou primeiro. A folha **Limites** mostra, ao lado de cada
+  campo, quanto do mês já é de fixas e parcelas; vazio remove.
+- O limite vale **do mês atual em diante**: os meses passados guardam o que
+  tinham e mostram quanto sobrou ou passou. Nunca impede um lançamento, só avisa.
 - **Mês futuro**: "Já comprometido" com as fixas e parcelas previstas, e quanto
-  delas ainda vai pedir confirmação.
+  delas ainda vai pedir confirmação; com limite, quanto sobra para o dia a dia.
 - **Rosca de gastos por categoria** (SVG puro, sem libs) com legenda e %.
 - **Barras por categoria**, com detalhamento das **subcategorias** quando existem.
 - **Por forma de pagamento** (quanto foi no Pix, no cartão...).
@@ -86,7 +96,8 @@ A carteira abre em 4 abas:
   *"todo mês pago 1500 de aluguel"* (isso vira uma fixa, não um lançamento solto),
   *"sobe o aluguel para 1650"* (edita a série, sem mexer no que já foi lançado),
   *"comprei uma TV em 10x de 300 no cartão"*, *"paguei a parcela da geladeira"*,
-  *"o que falta pagar?"*.
+  *"o que falta pagar?"*, *"limite de 800 para alimentação"*, *"quanto ainda
+  posso gastar?"*, *"vou estourar?"*. Ao lançar, a IA diz quanto ficou livre.
 - Para **Claude Code, Cursor ou ChatGPT**, um bloco de instruções para colar na
   conversa, que usa a API REST direto.
 - **Token separado do link**: revogar o acesso da IA não derruba o seu link, e
@@ -147,8 +158,8 @@ supabase/
                       # projeção do futuro, contas a pagar e RPCs
                       # (roda depois do schema.sql, que já chama o que ele cria)
   api-ia.sql          # token e funções da API para IA
-  checks.sql          # asserts das fixas/parcelados para um Postgres
-                      # descartável — nunca o Supabase
+  checks.sql          # asserts das fixas/parcelados/limites para um
+                      # Postgres descartável — nunca o Supabase
   analytics.sql       # relatórios de uso separados dos do Rachaí
   functions/controlai-mcp/   # servidor MCP (Edge Function) do conector
 tests/unit.mjs        # testes das funções puras
@@ -191,7 +202,7 @@ npm test                         # testes das funções puras
 
 Não há build: é HTML + CSS + ES modules servidos estaticamente.
 
-Os asserts do SQL (fixas, parcelados, contas a pagar) rodam num Postgres
+Os asserts do SQL (fixas, parcelados, contas a pagar, limites e projeção) rodam num Postgres
 descartável; o passo a passo está no cabeçalho de `supabase/checks.sql`.
 
 ---
@@ -235,14 +246,16 @@ supabase functions deploy controlai-mcp --no-verify-jwt --project-ref wkuykhomuc
 `--no-verify-jwt` é obrigatório: o claude.ai não manda chave do Supabase, e a
 autenticação é o token `ctl_...` no fim da URL, validado dentro da função.
 
-Ferramentas expostas (14): `contexto`, `lancar_despesa`, `resumo_do_mes`,
-`listar_despesas`, `editar_despesa`, `apagar_despesa`, `criar_fixa`,
-`lancar_parcelado`, `editar_fixa`, `listar_fixas`, `cancelar_fixa`,
-`marcar_pago`, `contas_a_pagar`, `criar_categoria`.
+Ferramentas expostas (15): `contexto`, `lancar_despesa`, `resumo_do_mes`,
+`definir_limite`, `listar_despesas`, `editar_despesa`, `apagar_despesa`,
+`criar_fixa`, `lancar_parcelado`, `editar_fixa`, `listar_fixas`,
+`cancelar_fixa`, `marcar_pago`, `contas_a_pagar`, `criar_categoria`.
 
 Ao publicar uma versão, a ordem é **SQL → Edge Function → front**: todo parâmetro
 novo tem default, então a Edge e o front antigos continuam funcionando com o SQL
-novo, mas não o contrário. O SQL é `schema.sql`, `fixas.sql` e `api-ia.sql`
+novo, mas não o contrário (o front 1.4.0 lê a média e a projeção do SQL). Quando
+a lista de ferramentas muda, **reconecte o conector no claude.ai**: ele guarda
+as ferramentas em cache e não enxerga as novas até lá. O SQL é `schema.sql`, `fixas.sql` e `api-ia.sql`
 **juntos, numa transação só** (veja abaixo): o `schema.sql` novo chama o que o
 `fixas.sql` cria, e aplicado sozinho deixaria o app no ar chamando função que
 ainda não existe.

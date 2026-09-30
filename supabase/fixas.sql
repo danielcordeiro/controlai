@@ -208,6 +208,70 @@ returns json language sql stable set search_path = controlai, pg_temp as $$
    where o.a_pagar or not p_so_a_pagar;
 $$;
 
+-- A ÚNICA definição do gasto contra o limite, do livre, da projeção e da média
+-- por dia: o app lê de controlai_mes e a IA de api_resumo e api_lancar.
+-- - Uma linha de total (category_id nulo, limite talvez nulo) e uma por
+--   categoria de 1º nível com limite vigente, mesmo sem gasto. A subcategoria
+--   soma no pai, pela regra coalesce(parent_id, id) de porCategoria.
+-- - gasto: TODAS as linhas do mês, pagas e a pagar, avulsas e de série; no
+--   total é o _total_mes. previsto: as ocorrências, só em mês futuro. Nos
+--   demais, _ocorrencias devolve o que já está gravado e contaria em dobro.
+-- - série: linha com recurring_id ou recurring_month (a solta de uma regra
+--   excluída guarda o mês e continua acontecendo uma vez por mês).
+-- - Projeção e média só no total, e só a avulsa é extrapolada. A média do mês
+--   corrente é uma divisão só, exata em numeric, para não arredondar duas vezes.
+-- - "Mês corrente" é o de p_hoje: os checks fixam o dia.
+create or replace function controlai._orcamento(p_ledger uuid, p_mes text,
+                                                 p_hoje date default controlai._hoje())
+returns table(category_id uuid, limite_cents integer, gasto_cents bigint, serie_cents bigint,
+              previsto_cents bigint, livre_cents bigint, livre_dia_cents bigint,
+              projecao_cents bigint, media_dia_cents bigint)
+language sql stable set search_path = controlai, pg_temp as $$
+  with m as (
+    select to_date(p_mes || '-01', 'YYYY-MM-DD') as ini,
+           extract(day from to_date(p_mes || '-01', 'YYYY-MM-DD') + interval '1 month - 1 day')::integer as dias,
+           extract(day from p_hoje)::integer as d,
+           p_mes = to_char(p_hoje, 'YYYY-MM') as corrente,
+           p_mes > to_char(p_hoje, 'YYYY-MM') as futuro),
+  itens as (   -- as linhas do mês e as previstas, já no topo da categoria
+    select coalesce(c.parent_id, e.category_id) as topo, e.amount_cents as cents,
+           (e.recurring_id is not null or e.recurring_month is not null) as serie, false as previsto
+      from m, controlai.expense e
+      left join controlai.category c on c.id = e.category_id
+     where e.ledger_id = p_ledger
+       and e.spent_on >= m.ini and e.spent_on < (m.ini + interval '1 month')::date
+    union all
+    select coalesce(c.parent_id, o.category_id), o.amount_cents, false, true
+      from controlai._ocorrencias(p_ledger, p_mes, p_mes) o
+      left join controlai.category c on c.id = o.category_id
+     where p_mes > to_char(p_hoje, 'YYYY-MM')),
+  lim as (select * from controlai._limites(p_ledger, p_mes)),
+  alvos as (
+    select null::uuid as alvo, (select l.limite_cents from lim l where l.category_id is null) as limite
+    union all
+    select l.category_id, l.limite_cents from lim l where l.category_id is not null),
+  s as (
+    select a.alvo, a.limite,
+           coalesce(sum(i.cents) filter (where not i.previsto), 0)::bigint as gasto,
+           coalesce(sum(i.cents) filter (where i.serie), 0)::bigint as serie,
+           coalesce(sum(i.cents) filter (where i.previsto), 0)::bigint as previsto
+      from alvos a
+      left join itens i on a.alvo is null or i.topo = a.alvo
+     group by a.alvo, a.limite)
+  select s.alvo, s.limite, s.gasto, s.serie, s.previsto,
+         s.limite - s.gasto - s.previsto,
+         -- divisão inteira de não negativo: floor
+         case when m.corrente and s.limite is not null
+              then greatest(s.limite - s.gasto - s.previsto, 0) / (m.dias - m.d + 1) end,
+         case when s.alvo is null and m.corrente and m.d >= 7
+              then s.serie + round((s.gasto - s.serie) * m.dias / m.d::numeric)::bigint end,
+         case when s.alvo is not null or m.futuro then null
+              when m.corrente
+              then round((s.serie * m.d + (s.gasto - s.serie) * m.dias) / (m.dias * m.d)::numeric)::bigint
+              else round(s.gasto / m.dias::numeric)::bigint end
+    from s, m;
+$$;
+
 -- Põe em dia TODOS os meses pendentes, do mais antigo até o mês corrente.
 -- Sem isso, o total do mês anterior e a lista de meses com gasto ignorariam as
 -- fixas de qualquer mês que a pessoa nunca tenha aberto na tela.
@@ -518,6 +582,7 @@ revoke all on function controlai._ocorrencias(uuid, text, text, uuid)       from
 revoke all on function controlai._gerar_fixas(uuid, text)                   from anon, authenticated, public;
 revoke all on function controlai._andamento(controlai.recurring)            from anon, authenticated, public;
 revoke all on function controlai._previstas(uuid, text, boolean)            from anon, authenticated, public;
+revoke all on function controlai._orcamento(uuid, text, date)               from anon, authenticated, public;
 revoke all on function controlai._catchup_fixas(uuid, text)                 from anon, authenticated, public;
 revoke all on function controlai._solta_da_fixa(uuid)                       from anon, authenticated, public;
 

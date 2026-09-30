@@ -1,7 +1,7 @@
 // Agregações do mês — funções PURAS (sem DOM, sem rede), exercitadas por tests/unit.mjs.
 // Todas recebem a lista de despesas do mês já carregada pelo snapshot e devolvem
 // linhas prontas para desenhar. Valores sempre em centavos inteiros.
-import { diasNoMes, mesDe, fmtBRL } from "./ui.js";
+import { fmtBRL } from "./ui.js";
 
 export const SEM_CATEGORIA = { id: null, name: "Sem categoria", color: "#9ca3af" };
 export const SEM_FORMA = { id: null, name: "Não informada" };
@@ -165,28 +165,47 @@ export function maioresDespesas(despesas, n = 5) {
     .slice(0, Math.max(0, n));
 }
 
+// Média por dia, projeção, livre e "passou" NÃO se calculam aqui: saem de
+// controlai._orcamento (fixas.sql), a única definição, que o app lê em
+// s.orcamento e a IA em resumo_do_mes. As duas funções abaixo só montam a tela.
+
 /**
- * Média por dia e projeção do mês. Só a despesa avulsa é extrapolada: a de
- * série (fixa, parcela — inclusive a solta de uma regra excluída, que guarda
- * o mês) acontece uma vez por mês. Extrapolar tudo fazia um aluguel de
- * R$ 1.500 no dia 7 virar R$ 6.428 de projeção e R$ 214 "por dia".
- * Mês fechado: total ÷ dias. Projeção só no mês corrente e a partir do 7º dia —
- * antes disso a média de dois ou três dias não significa nada.
+ * Linhas do card "Limites": uma por categoria com limite vigente no mês.
+ * consumo = gasto + previsto (o previsto só existe no mês futuro); o % é com
+ * floor, para 99,9% não virar 100%, e a barra para em 100. Chegar exatamente
+ * no limite não é passar. Ordem: quem passou, depois o maior %, depois o nome.
  */
-export function ritmoDoMes(despesas, mes, hoje) {
-  const dias = diasNoMes(mes);
-  const corrente = mesDe(hoje) === mes;
-  const diaAtual = corrente ? Number(hoje.slice(8, 10)) : dias;
-  let serie = 0, avulsas = 0;
-  for (const d of despesas || []) {
-    if (d.recurring_id || d.recurring_month) serie += d.amount_cents || 0;
-    else avulsas += d.amount_cents || 0;
-  }
-  const mesInteiro = serie + (avulsas * dias) / diaAtual;
-  return {
-    mediaDia: Math.round(mesInteiro / dias),
-    projecao: corrente && diaAtual >= 7 ? Math.round(mesInteiro) : null,
-  };
+export function linhasLimites(orcamento, categorias) {
+  const porId = new Map((categorias || []).map((c) => [c.id, c]));
+  return (orcamento || [])
+    .filter((o) => o.category_id != null && o.limite_cents > 0)
+    .map((o) => {
+      const c = porId.get(o.category_id) || SEM_CATEGORIA;
+      const consumo = (o.gasto_cents || 0) + (o.previsto_cents || 0);
+      const pct = Math.floor((consumo * 100) / o.limite_cents);
+      return {
+        id: o.category_id, name: c.name, color: c.color || SEM_CATEGORIA.color,
+        limite: o.limite_cents, consumo, previsto: o.previsto_cents || 0,
+        livre: o.livre_cents, livreDia: o.livre_dia_cents,
+        pct, barra: Math.min(pct, 100), passou: o.livre_cents < 0,
+      };
+    })
+    .sort((a, b) => (b.passou - a.passou) || (b.pct - a.pct)
+      || String(a.name).localeCompare(String(b.name), "pt-BR"));
+}
+
+/**
+ * Barra do card do total, em duas partes: o que as séries já tomam (fixas e
+ * parcelas lançadas; no mês futuro, as previstas) e o dia a dia. A escala é
+ * max(limite, consumo): os ~85% ocupados no dia 1 aparecem como 85%, e passar
+ * do limite enche a barra sem estourá-la. Null quando não há limite total.
+ */
+export function barraDoTotal(t) {
+  if (!t || !(t.limite_cents > 0)) return null;
+  const serie = (t.serie_cents || 0) + (t.previsto_cents || 0);
+  const diaADia = Math.max(0, (t.gasto_cents || 0) - (t.serie_cents || 0));
+  const escala = Math.max(t.limite_cents, serie + diaADia);
+  return { serie, diaADia, pctSerie: (serie * 100) / escala, pctDiaADia: (diaADia * 100) / escala };
 }
 
 /**

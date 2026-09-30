@@ -243,7 +243,7 @@ do SQL, porque os KPIs passam a vir do servidor.
   - categoria limitada sem gasto aparece com 0;
   - a projeção dá 180000 no dia 7 (150000 de série + 7000 de avulsa) e null no
     dia 6, no mês passado e no futuro;
-  - `media_dia` e `livre_dia` com `floor`;
+  - `media_dia` com `round` e `livre_dia` com `floor`;
   - `rotacionar_id` leva os limites junto e `del_categoria` leva o limite junto;
   - paridade: `api_resumo.orcamento` × 100 é igual a `controlai_mes.orcamento`;
   - `lancar` devolve `limites`;

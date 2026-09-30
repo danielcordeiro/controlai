@@ -79,6 +79,13 @@ controlai.recurring       a despesa fixa ou o parcelado — uma REGRA, não lan�
 
 controlai.recurring_skip  "apaguei a ocorrência deste mês"
   (recurring_id, month_key) pk
+
+controlai.limite          limite do mês, com vigência (seção 10e)
+  id, ledger_id           ← id só para a replica identity do update em cascata
+  category_id             ← null = total do mês; senão, categoria de 1º nível
+  mes_inicio text         ← 'AAAA-MM': vale deste mês até a próxima linha
+  limite_cents integer    ← > 0; null = removido deste mês em diante (tombstone)
+  unique nulls not distinct (ledger_id, category_id, mes_inicio)
 ```
 
 **Centavos inteiros** (convenção herdada do Rachaí): nenhum `float` no caminho do
@@ -285,8 +292,9 @@ estraga justamente o número que o app existe para mostrar.
 | Função | Para quê |
 |---|---|
 | `controlai_api_contexto` | categorias, subcategorias, formas, hoje e mês atual |
-| `controlai_api_lancar` | valor em reais, categoria por nome, data e forma opcionais |
-| `controlai_api_resumo` | total do mês por categoria e por forma, com o mês anterior; `pago` e `a_pagar`; `comprometido` e `comprometido_a_confirmar`; mês futuro sai sem comparação |
+| `controlai_api_lancar` | valor em reais, categoria por nome, data e forma opcionais; devolve `limites` (o total e a categoria lançada, se tiverem limite) |
+| `controlai_api_resumo` | total do mês por categoria e por forma, com o mês anterior; `pago` e `a_pagar`; `comprometido` e `comprometido_a_confirmar`; mês futuro sai sem comparação; bloco `orcamento` com limite, livre, projeção e as categorias limitadas |
+| `controlai_api_definir_limite` | limite do total ou de uma categoria principal, do mês atual em diante; `0` remove |
 | `controlai_api_listar` | lançamentos do mês com id, `a_pagar` e `parcela` (`3/10`); em mês futuro, também as previstas (`prevista: true`, sem id) |
 | `controlai_api_editar` / `apagar` | alteram só o que foi informado |
 | `controlai_api_criar_fixa` | fixa ou parcelado: `valor` ou `valor_total` (exatamente um), `meses` para um número de repetições ou omitido para "até cancelar", `confirmar` para boleto/carnê |
@@ -324,7 +332,8 @@ ferramenta própria, `lancar_parcelado`, que chama a mesma
 "10x" com um lançamento do total ou com dez. As instruções também dizem que
 boleto e carnê levam `confirmar=true`, que "paguei X" é `contas_a_pagar` +
 `marcar_pago` e que quitar é `cancelar_fixa` + apagar as pendentes cobertas +
-`lancar_despesa`.
+`lancar_despesa`. Na 1.4.0 elas ganharam o limite: "quanto ainda posso gastar" é
+`resumo_do_mes.orcamento` e "limite de X para Y" é `definir_limite` (seção 10e).
 
 Erro de ferramenta volta como `isError` com o texto da exceção, não como erro de
 protocolo — assim o modelo lê *"Categoria X não existe. Disponíveis: ..."* e se
@@ -350,7 +359,8 @@ o arquivo como *Microsoft Excel 2007+* e o `unzip -t` passa sem erro.
 | Função | Para quê |
 |---|---|
 | `controlai_criar(name, email)` | cria a carteira e **semeia** 10 categorias e 5 formas de pagamento, para a pessoa já sair lançando |
-| `controlai_mes(ledger, mes)` | **uma chamada** devolve tudo da tela: carteira, categorias, formas, despesas do mês (com `a_pagar` e `parcela`), fixas com andamento, total do mês, total do mês anterior, os meses com lançamento, as `previstas` de mês futuro, as `pendentes` da carteira e as `proximas` a confirmar. É também um gatilho do catch-up, que materializa as ocorrências das fixas até o mês corrente |
+| `controlai_mes(ledger, mes)` | **uma chamada** devolve tudo da tela: carteira, categorias, formas, despesas do mês (com `a_pagar` e `parcela`), fixas com andamento, total do mês, total do mês anterior, os meses com lançamento, as `previstas` de mês futuro, as `pendentes` da carteira, as `proximas` a confirmar e o `orcamento` (linhas de `_orcamento`: o total primeiro, depois as categorias com limite). É também um gatilho do catch-up, que materializa as ocorrências das fixas até o mês corrente |
+| `controlai_set_limite(ledger, category, limite_cents)` | grava o limite do total (`category` nula) ou de uma categoria principal, do mês atual em diante; `limite_cents` nulo remove |
 | `controlai_meus_ids()` | recuperação (lê o e-mail do JWT) |
 | `controlai_add_despesa` / `update` / `del` | CRUD da despesa, com as validações de posse e de data (`_data_ok`) |
 | `controlai_marcar_pago(ledger, expense, pago)` | pago ou de volta para a pagar; avulsa não volta, é sempre paga |
@@ -377,9 +387,10 @@ js/ui.js       DOM, dinheiro em centavos (parse pt-BR/en-US), datas e meses, toa
                formulário), limiteNavegacao (até onde o › vai) e limitesDataEdicao
                (a régua de data do servidor no campo de edição)
 js/report.js   agregações PURAS: por categoria (com rollup pai/filho), por forma,
-               por dia, maiores despesas, CSV; ritmoDoMes (média e projeção, só o
-               avulso extrapolado), resumoAPagar (o card "A pagar") e andamentoFixa
-               ("3 de 10 pagas · falta R$ ...")
+               por dia, maiores despesas, CSV; resumoAPagar (o card "A pagar"),
+               andamentoFixa ("3 de 10 pagas · falta R$ ..."), linhasLimites (o card
+               "Limites") e barraDoTotal (a barra em duas partes do card do total).
+               Média, projeção e livre vêm prontos do servidor (seção 10e)
 js/db.js       wrapper das RPCs + fluxo de Auth da recuperação
 js/xlsx.js     gerador de .xlsx (ZIP stored + OOXML), puro e testado
 js/app.js      rotas (#/ · #/c/<uuid> · #/recuperar), telas e formulários
@@ -421,7 +432,7 @@ não ganha uma linha redundante repetindo a si mesma.
 - **Despesas fixas**, no navegador: criar "Aluguel" de R$ 1.500 no dia 5 "até eu
   cancelar" lançou a ocorrência de setembro na hora, com o selo `fixa` na lista e
   a regra em Ajustes com editar, pausar e excluir.
-- **Conector MCP** na v1, então com 10 ferramentas (hoje são 14): `criar_fixa`
+- **Conector MCP** na v1, então com 10 ferramentas (hoje são 15): `criar_fixa`
   (com número de meses e indeterminada), `listar_fixas` e `cancelar_fixa` por
   `curl` no endpoint publicado; id de outra carteira é recusado.
 - **SQL versionado aplicado do zero** num Postgres 16 limpo, na ordem
@@ -556,7 +567,8 @@ O mecanismo está na seção 3. O resto:
   uma fixa de R$ 1.500 no dia 7 virava R$ 6.428 de projeção e R$ 214 "por dia".
   Agora a conta mora em `ritmoDoMes` (`report.js`, testada): só as linhas
   avulsas são extrapoladas; as de série entram uma vez. A correção da seção 10
-  (projetar só a partir do 7º dia) atenuava o sintoma sem tirar a causa.
+  (projetar só a partir do 7º dia) atenuava o sintoma sem tirar a causa. (Na
+  1.4.0 a mesma regra foi para o SQL, em `_orcamento`; veja a seção 10e.)
 - **Totais.** "Gastei" não mudou de definição: todas as linhas do mês, pagas e
   a pagar. O card do total ganha "Pago · A pagar"; "Contas a pagar" são todas as
   linhas `a_pagar` da carteira, atrasada quando o vencimento é anterior a hoje;
@@ -587,10 +599,111 @@ O mecanismo está na seção 3. O resto:
 
 ---
 
+## 10e. Limite do mês e projeção (1.4.0)
+
+Desenho completo, com o contrato de interfaces:
+[`docs/plans/2026-09-30-limites-projecao-design.md`](plans/2026-09-30-limites-projecao-design.md).
+
+O pedido: um limite para o mês inteiro ou para cada categoria, e uma projeção do
+gasto. O perfil real complica as duas coisas: 24 séries somam ~R$ 17 mil já
+comprometidos desde o dia 1, e as despesas do dia a dia mal começaram a ser
+lançadas, ou seja, quase não há histórico para estimar nada. Três propostas
+independentes (mínimo útil, uso diário, corretude do cálculo) foram comparadas
+por um juiz que conferiu cada premissa no código; venceu o mínimo útil, com o
+cálculo inteiro levado para uma função SQL só.
+
+| # | Decisão do dono |
+|---|---|
+| L1 | O limite, total e por categoria, **conta tudo** o que entra no "Total do mês": pagas e a pagar, avulsas e de série. No mês futuro conta o comprometido mais o que já foi lançado |
+| L2 | **Vigência mensal**: mudar o limite vale do mês atual em diante; cada mês passado guarda o limite que tinha |
+| L3 | **Sem projeção por categoria**: por categoria o app mostra gasto, livre, "até R$ X/dia" e "passou"; a projeção existe só no total. Revisitar com três meses fechados de avulsas (jan/2027) |
+| L4 | **Sem limite para um mês futuro específico**; todo limite vale do mês atual em diante. A tabela já tem vigência, então isso entra depois sem migração |
+| L5 | A edição fica numa **folha "Limites"** única, aberta pela aba Mês, com as fixas e parcelas de cada categoria ao lado do campo |
+
+**Modelo.** `controlai.limite` guarda uma linha por alvo e mês de início: o total
+(`category_id` nulo) ou uma categoria de **1º nível** — o gasto das subcategorias
+soma no pai pela mesma regra `coalesce(parent_id, id)` do relatório, e
+subcategoria não aceita limite. Os limites são independentes (nada confere se a
+soma das categorias cabe no total) e **nunca bloqueiam** um lançamento: só
+informam.
+
+**Vigência e tombstone.** Toda gravação usa `mes_inicio = _mes_atual()`, e mudar
+de novo no mesmo mês é upsert; como nunca existe linha com início no futuro,
+nada precisa ser apagado. O limite do mês M é o da linha com o maior
+`mes_inicio <= M` (`controlai._limites`). **Remover grava `limite_cents = null`**:
+apagar a linha faria o limite do mês anterior voltar a valer. Pelo mesmo motivo o
+filtro `limite_cents is not null` vem **depois** do `distinct on` — antes, o
+tombstone sumiria e o limite removido ressuscitaria. Mês anterior ao primeiro
+limite não tem limite; mês futuro usa o vigente hoje.
+
+**`_orcamento`: a definição única.** `controlai._orcamento(ledger, mes, hoje)`
+(em `fixas.sql`, porque lê `_ocorrencias`) é o único lugar que calcula gasto
+contra limite, livre, livre por dia, projeção e média. Devolve sempre a linha do
+total (com `limite_cents` possivelmente nulo) e uma por categoria com limite
+vigente, mesmo sem gasto. O app lê essas linhas em `controlai_mes.orcamento`; a
+IA, em `api_resumo.orcamento` (em reais), e a paridade das duas é um check.
+Manter a conta em JavaScript para o app e em SQL para a IA repetiria o problema
+que a seção 10c eliminou: a mesma regra em duas versões. Por isso `ritmoDoMes`
+saiu do `report.js`, e os KPIs "por dia" e "projeção do mês" leem a linha do
+total. As regras:
+
+- **gasto** é a soma das linhas do mês, pagas e a pagar, avulsas e de série — no
+  total, exatamente `_total_mes`. **previsto** é `_ocorrencias(M, M)` e só entra
+  no mês futuro: nos meses corrente e passado as ocorrências já são linhas e
+  contariam em dobro. Isso funciona porque `_gerar_fixas` grava todas as
+  ocorrências do mês corrente no primeiro catch-up: fixas e parcelas estão no
+  gasto desde o dia 1, e o livre é de fato o que sobra para o dia a dia;
+- `livre = limite − gasto − previsto`; passou é `livre < 0` (chegar exatamente no
+  limite não é passar); `livre_dia = floor(max(livre, 0) / (dias que faltam,
+  contando hoje))`, só no mês corrente;
+- **projeção** (só no total, só no mês corrente e só a partir do dia 7) é a regra
+  de antes, sem mudar o número: `série + round(avulsas × D / d)` — a fixa entra
+  uma vez, só a avulsa é extrapolada. `media_dia` é a mesma conta dividida pelos
+  dias do mês; no mês passado, gasto ÷ dias;
+- percentual exibido com `floor(consumo × 100 / limite)` e a barra parada em 100.
+
+**Tela.** O card do total ganha, quando há limite total, uma barra em duas partes
+sobre `max(limite, consumo)`: fixas e parcelas (no futuro, o previsto) numa cor
+apagada e o dia a dia em destaque, para os ~85% tomados no dia 1 não parecerem
+alarme. O texto segue o tempo do mês: no corrente, "Limite · livre · até R$ Y/dia"
+ou "Passou R$ X do limite", mais "No ritmo atual fecha em R$ P" a partir do dia 7
+(em âmbar quando passa do limite); no passado, "ficou R$ X abaixo" ou "passou";
+no futuro, "sobram R$ X para o dia a dia". O card "Limites" (abaixo do "A pagar",
+também no mês vazio e no futuro) tem uma linha por categoria limitada, quem
+passou primeiro e depois o maior percentual. A folha "Limites" abre só no mês
+corrente — pelo atalho no card do total ("Definir limite" / "Editar limites") ou
+pelo "Editar" do card — e salva só o que mudou, uma chamada por vez; vazio remove.
+
+**IA.** `definir_limite {valor, categoria?}` (sem categoria é o total; `0`
+remove) chama `controlai_api_definir_limite`, que resolve o nome e delega para
+`controlai_set_limite` — a regra não existe em duas versões. `resumo_do_mes`
+ganhou o bloco aditivo `orcamento`, e a descrição manda **nunca extrapolar o
+total por conta própria**: o modelo, vendo R$ 17 mil no dia 3, multiplicaria por
+dez. `lancar_despesa` devolve `limites` (o total e a categoria lançada, só com
+limite vigente), e a descrição pede para dizer quanto ficou livre. De brinde,
+a busca exata de `_categoria_por_nome` passou a preferir o 1º nível quando uma
+categoria e uma subcategoria têm o mesmo nome (antes, `limit 1` sem `order by`).
+
+**Segurança.** `controlai.limite` tem RLS ligada e nenhuma policy;
+`controlai_set_limite` é SECURITY DEFINER com `_ledger_ok` e `_pertence`; as
+internas `_limites` e `_orcamento` têm o execute revogado. As FKs cascateiam da
+carteira (`on update` por causa de `controlai_rotacionar_id`, `on delete` por
+`controlai_apagar`) e da categoria (`del_categoria` só apaga categoria sem
+histórico, e o limite vai junto).
+
+**Deploy e reconexão.** Mesma ordem da 1.3.0: `schema.sql`, `fixas.sql` e
+`api-ia.sql` numa transação só; a Edge Function; o front; e por fim **reconectar
+o conector no claude.ai**, que guarda a lista de ferramentas em cache (sem isso
+ele continua mostrando as ferramentas antigas e não enxerga `definir_limite`). O
+front 1.3.0 ignora a chave `orcamento`, mas o 1.4.0 **não pode** subir antes do
+SQL: os KPIs passaram a vir do servidor (sem a chave, "por dia" mostra "-" e a
+projeção cai no "maior despesa"). Conector 1.4.0, com 15 ferramentas.
+
+---
+
 ## 11. O que ficou fora da v1
 
-Orçamento/meta por categoria, receitas (o app é só de despesa), múltiplas moedas
-e anexo de comprovante. OAuth no conector MCP também ficou fora: para conector
+Receitas (o app é só de despesa), múltiplas moedas e anexo de comprovante. OAuth no conector MCP também ficou fora: para conector
 pessoal o claude.ai aceita servidor sem autenticação, e o token na URL já é o
 mesmo nível de segredo do link da carteira. O modelo comporta todos — nenhum
 exigiria migração destrutiva.
@@ -601,3 +714,13 @@ quitar** (D5) — quando fizer falta, é a única escrita em mês futuro e entra
 futura (ajusta-se quando o mês chega); "marcar todas como pagas" por série;
 colunas de situação e parcela no Excel/CSV; dia de fechamento do cartão e
 lembrete de vencimento.
+
+Do limite do mês (seção 10e), ficaram fora: **projeção por categoria** (uma
+compra isolada vira um estouro inventado; o "até R$ X/dia" responde a mesma
+pergunta com fatos) e **estimativa das avulsas do mês futuro** — as duas voltam à
+mesa com três meses fechados; **limite em subcategoria** (o modelo aceita, basta
+relaxar a validação); **limite a partir de um mês futuro** (L4; seria um
+parâmetro opcional em `set_limite`); alertas por push, e-mail ou toast (o card é
+o alerta, e na IA o retorno de `lancar_despesa`); sobra de um mês passando para o
+outro; limite por forma de pagamento; tirar uma categoria ("Poupar") do total; e
+limites no Excel/CSV ou em gráfico histórico.

@@ -9,13 +9,13 @@ import {
 } from "./ui.js";
 import {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
-  ritmoDoMes, resumoAPagar, andamentoFixa,
+  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal,
 } from "./report.js";
 import { despesasParaXLSX } from "./xlsx.js";
 
 // Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
 // conferir no aparelho que a versão nova chegou.
-const VERSAO = "1.3.0";
+const VERSAO = "1.4.0";
 
 const root = () => document.getElementById("app");
 
@@ -528,6 +528,10 @@ function tabBtn(key, label) {
 
 /** O mês aberto ainda não chegou: a tela mostra o comprometido, não o gasto. */
 const ehFuturo = () => state.mes > mesDe(hojeISO());
+const ehMesAtual = () => state.mes === mesDe(hojeISO());
+
+/** A linha do total (category_id nulo) de s.orcamento; null se o snapshot não a trouxer. */
+const totalOrcamento = () => (state.snapshot?.orcamento || []).find((o) => o.category_id == null) || null;
 
 function navegadorMes() {
   const s = state.snapshot;
@@ -601,6 +605,7 @@ function abaMes() {
     return el("div", {}, [
       cardTotal(total, anterior, aPagar),
       cardAPagar(),
+      cardLimites(),
       el("div", { class: "card empty" }, [
         el("h2", { text: "Nenhuma despesa neste mês" }),
         el("p", { text: "Toque em “＋ Despesa” para lançar a primeira." }),
@@ -612,15 +617,18 @@ function abaMes() {
   const cats = porCategoria(desp, s.categories || []);
   const formas = porFormaPagamento(desp, s.payment_methods || []);
   const maiores = maioresDespesas(desp, 5);
-  const { mediaDia, projecao } = ritmoDoMes(desp, state.mes, hojeISO());
+  // média e projeção vêm do servidor (_orcamento), a mesma conta que a IA lê
+  const mediaDia = totalOrcamento()?.media_dia_cents ?? null;
+  const projecao = totalOrcamento()?.projecao_cents ?? null;
 
   return el("div", {}, [
     cardTotal(total, anterior, aPagar),
     cardAPagar(),
+    cardLimites(),
 
     el("div", { class: "kpis" }, [
       kpi(String(desp.length), desp.length === 1 ? "lançamento" : "lançamentos"),
-      kpi(fmtBRLCurto(mediaDia), "por dia"),
+      kpi(mediaDia != null ? fmtBRLCurto(mediaDia) : "-", "por dia"),
       kpi(fmtBRLCurto(cats[0]?.cents || 0), `maior: ${cats[0]?.name || "-"}`),
       projecao != null ? kpi(fmtBRLCurto(projecao), "projeção do mês") : kpi(fmtBRLCurto(Math.max(...desp.map((d) => d.amount_cents))), "maior despesa"),
     ]),
@@ -675,14 +683,25 @@ function abaMesFuturo() {
   const catMap = new Map((s.categories || []).map((c) => [c.id, c]));
   const formas = new Map((s.payment_methods || []).map((f) => [f.id, f]));
   const hoje = hojeISO();
+  // o limite do mês futuro conta o comprometido mais o que já foi lançado (L1)
+  const t = totalOrcamento();
+  const barra = barraDoTotal(t);
 
   return el("div", {}, [
     el("div", { class: "total total--futuro" }, [
       el("div", { class: "total__label", text: `Já comprometido em ${mesExtenso(state.mes)}` }),
       el("div", { class: "total__value", text: fmtBRL(comprometido) }),
+      barra ? barraDuasPartes(barra, t) : null,
+      !barra ? null
+        : t.livre_cents < 0
+          ? el("div", { class: "total__cmp" }, [el("span", { class: "apagar__atraso",
+              text: `O comprometido já passa ${fmtBRLCurto(-t.livre_cents)} do limite` })])
+          : el("div", { class: "total__cmp",
+              text: `de ${fmtBRLCurto(t.limite_cents)} · sobram ${fmtBRLCurto(t.livre_cents)} para o dia a dia` }),
       aConfirmar ? el("div", { class: "total__cmp", text: `${fmtBRL(aConfirmar)} a confirmar` }) : null,
       lancado ? el("div", { class: "total__cmp", text: `Já lançado ${fmtBRL(lancado)}` }) : null,
     ]),
+    cardLimites(),
     todas.length
       ? el("div", {}, [
           el("h3", { class: "section", text: "Para onde vai o dinheiro" }),
@@ -833,7 +852,187 @@ function cardTotal(total, anterior, aPagar) {
     // a parcela a pagar conta no mês do vencimento; a divisão só aparece se houver
     aPagar ? el("div", { class: "total__pago", text: `Pago ${fmtBRL(total - aPagar)} · A pagar ${fmtBRL(aPagar)}` }) : null,
     cmp ? el("div", { class: "total__cmp", text: cmp }) : null,
+    ...limiteNoTotal(),
   ]);
+}
+
+/**
+ * O limite total no card do mês corrente ou passado. Sem limite, só o mês
+ * corrente muda: ganha o atalho para a folha. O texto segue o tempo do mês:
+ * no corrente, livre e "até R$ X/dia"; no passado, quanto sobrou ou passou.
+ */
+function limiteNoTotal() {
+  const t = totalOrcamento();
+  const barra = barraDoTotal(t);
+  const atual = ehMesAtual();
+  if (!barra) return atual ? [linkLimites("Definir limite")] : [];
+  const L = fmtBRLCurto(t.limite_cents);
+  const passou = t.livre_cents < 0;
+  const X = fmtBRLCurto(Math.abs(t.livre_cents));
+  if (!atual) {
+    return [barraDuasPartes(barra, t),
+      el("div", { class: "total__cmp", text: `Limite ${L} · ${passou ? `passou ${X}` : `ficou ${X} abaixo`}` })];
+  }
+  const acima = t.projecao_cents != null ? t.projecao_cents - t.limite_cents : null;
+  return [
+    barraDuasPartes(barra, t),
+    passou
+      ? el("div", { class: "total__cmp" }, [el("span", { class: "apagar__atraso", text: `Passou ${X} do limite` })])
+      : el("div", { class: "total__cmp", text: `Limite ${L} · livre ${X} · até ${fmtBRLCurto(t.livre_dia_cents || 0)}/dia` }),
+    // projeção só a partir do dia 7 (o servidor manda nula antes)
+    acima == null ? null : el("div", {
+      class: `total__cmp${acima > 0 ? " total__alerta" : ""}`,
+      text: `No ritmo atual fecha em ${fmtBRLCurto(t.projecao_cents)} · `
+        + (acima > 0 ? `${fmtBRLCurto(acima)} acima do limite` : "dentro do limite"),
+    }),
+    linkLimites("Editar limites"),
+  ];
+}
+
+/** Barra em duas partes (fixas e parcelas + dia a dia); o texto vai no aria-label. */
+function barraDuasPartes(b, t) {
+  return el("div", {
+    class: "catrow__track total__track", role: "img",
+    "aria-label": `${fmtBRLCurto(b.serie + b.diaADia)} de ${fmtBRLCurto(t.limite_cents)}: `
+      + `${fmtBRLCurto(b.serie)} de fixas e parcelas e ${fmtBRLCurto(b.diaADia)} do dia a dia`,
+  }, [
+    el("div", { class: "catrow__fill total__fill--serie", style: `width:${b.pctSerie.toFixed(1)}%` }),
+    el("div", { class: "catrow__fill total__fill--dia", style: `width:${b.pctDiaADia.toFixed(1)}%` }),
+  ]);
+}
+
+function linkLimites(texto) {
+  return el("button", { class: "total__link", type: "button", "aria-haspopup": "dialog", text: texto,
+    onClick: () => abrirLimites() });
+}
+
+/**
+ * Card "Limites": uma linha por categoria com limite vigente no mês aberto (os
+ * números vêm prontos de _orcamento). Some quando nenhuma categoria tem limite.
+ * Editar só existe no mês corrente: todo limite vale do mês atual em diante.
+ */
+function cardLimites() {
+  const s = state.snapshot;
+  const linhas = linhasLimites(s.orcamento, s.categories);
+  if (!linhas.length) return null;
+  const futuro = ehFuturo();
+  const atual = ehMesAtual();
+  const R = fmtBRLCurto;
+  const detalhe = (l) =>
+    futuro ? `${R(l.previsto)} comprometidos · ${l.passou ? `passou ${R(-l.livre)}` : `sobram ${R(l.livre)}`}`
+    : l.passou ? `passou ${R(-l.livre)}`
+    : atual ? `livre ${R(l.livre)} · até ${R(l.livreDia || 0)}/dia`
+    : `ficou ${R(l.livre)} abaixo`;
+  return el("div", { class: "card limites" }, [
+    el("div", { class: "apagar__head" }, [
+      el("h3", { class: "apagar__title", text: "Limites" }),
+      atual ? el("button", { class: "btn btn--ghost btn--sm", type: "button", "aria-haspopup": "dialog",
+        text: "Editar", "aria-label": "Editar limites", onClick: () => abrirLimites() }) : null,
+    ]),
+    el("ul", { class: "catlist", style: "margin-top:10px" }, linhas.map((l) => el("li", {}, [
+      el("div", { class: "catrow__top" }, [
+        el("span", { class: "catrow__dot", style: `background:${l.color}` }),
+        el("span", { class: "catrow__name", text: l.name }),
+        el("span", { class: "catrow__amount", text: `${R(l.consumo)} de ${R(l.limite)}` }),
+      ]),
+      el("div", {
+        class: "catrow__track", role: "progressbar", "aria-label": `Limite de ${l.name}`,
+        "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(l.barra),
+        "aria-valuetext": `${R(l.consumo)} de ${R(l.limite)} (${l.pct}%)`,
+      }, [
+        el("div", { class: "catrow__fill", style: `width:${l.barra}%;background:${l.passou ? "var(--neg)" : "var(--brand)"}` }),
+      ]),
+      el("div", { class: "catrow__meta" }, [
+        el("span", { class: l.passou ? "apagar__atraso" : null, text: detalhe(l) }),
+        el("span", { text: `${l.pct}%` }),
+      ]),
+    ]))),
+  ]);
+}
+
+/**
+ * Folha "Limites" (só no mês corrente): o total e uma linha por categoria
+ * principal, com as fixas e parcelas do mês ao lado do campo para mostrar
+ * quanto já está tomado. Vazio remove. Salva só o que mudou, uma chamada por vez.
+ */
+function abrirLimites() {
+  const s = state.snapshot;
+  const vigente = new Map((s.orcamento || []).filter((o) => o.limite_cents != null)
+    .map((o) => [o.category_id, o.limite_cents]));
+  const serie = (s.expenses || []).filter((d) => d.recurring_id || d.recurring_month);
+  const seriePorCat = new Map(porCategoria(serie, s.categories).map((c) => [c.id, c.cents]));
+  // arquivada entra só se tem limite: é o único jeito de removê-lo
+  const cats = (s.categories || []).filter((c) => !c.parent_id && (!c.archived || vigente.has(c.id)));
+  const campos = [];
+
+  function linha(categoryId, nome, cor, dica) {
+    const id = `ladfb-c${++seqId}`;
+    const antes = vigente.get(categoryId) ?? null;
+    const input = el("input", {
+      class: "input", id, inputmode: "decimal", placeholder: "sem limite", autocomplete: "off",
+      value: antes == null ? "" : (antes / 100).toFixed(2).replace(".", ","),
+      "aria-describedby": dica ? `${id}-d` : null,
+    });
+    input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") salvar(); });
+    campos.push({ categoryId, nome, input, antes });
+    return el("div", { class: "limrow" }, [
+      el("div", { style: "min-width:0" }, [
+        el("label", { class: "limrow__nome", for: id }, [
+          cor ? el("span", { class: "catrow__dot", style: `background:${cor}` }) : null,
+          el("span", { text: nome }),
+        ]),
+        dica ? el("div", { class: "small muted", id: `${id}-d`, text: dica }) : null,
+      ]),
+      input,
+    ]);
+  }
+
+  const corpo = el("div", {}, [
+    linha(null, "Total do mês", null, `Este mês já tem ${fmtBRLCurto(totalCentavos(serie))} em fixas e parcelas.`),
+    el("h3", { class: "section", text: "Por categoria" }),
+    ...cats.map((c) => {
+      const sc = seriePorCat.get(c.id) || 0;
+      return linha(c.id, c.name, c.color, sc ? `fixas e parcelas ${fmtBRLCurto(sc)}` : null);
+    }),
+    el("p", { class: "small muted", style: "margin:14px 0 0", text:
+      `Vale de ${mesExtenso(mesDe(hojeISO()))} em diante; meses passados guardam o limite que tinham. `
+      + "O limite conta tudo o que entra no total do mês e nunca impede um lançamento." }),
+  ]);
+
+  const btn = el("button", { class: "btn btn--primary btn--lg", type: "button", text: "Salvar" });
+  const salvar = acaoUnica(async () => {
+    const mudou = [];
+    for (const c of campos) {
+      const txt = c.input.value.trim();
+      const cents = txt ? parseAmountToCents(txt) : null;
+      if (txt && !cents) {
+        toast(`${c.nome}: informe um valor maior que zero (vazio remove).`, "error");
+        c.input.focus();
+        return;
+      }
+      if (cents > MAX_CENTAVOS) { toast(`${c.nome}: valor grande demais. Confira os zeros.`, "error"); c.input.focus(); return; }
+      if (cents !== c.antes) mudou.push({ c, cents });
+    }
+    if (!mudou.length) { close(); return; }
+    btn.disabled = true;
+    btn.textContent = "Salvando...";
+    try {
+      for (const { c, cents } of mudou) {
+        await db.setLimite(state.ledgerId, c.categoryId, cents);
+        c.antes = cents;   // se o próximo falhar, tentar de novo não reenvia este
+      }
+      close();
+      await recarregar();
+      toast("Limites salvos.", "success");
+    } catch (e) {
+      toast(e.message, "error");
+      btn.disabled = false;
+      btn.textContent = "Salvar";
+      recarregar();   // o que já foi salvo aparece na tela de trás
+    }
+  });
+  btn.addEventListener("click", salvar);
+  const { close } = openModal("Limites", corpo, btn);
 }
 
 function kpi(value, label) {
@@ -1733,7 +1932,10 @@ function montaPromptIA(base, anon, token) {
     "Funções:",
     "  controlai_api_contexto   {}",
     "  controlai_api_lancar     {p_valor, p_categoria, p_data?, p_forma?, p_descricao?}",
-    "  controlai_api_resumo     {p_mes?}            -> total do mês por categoria",
+    "  controlai_api_resumo     {p_mes?}            -> total do mês por categoria; o bloco orcamento traz",
+    "                           limite, livre, livre_por_dia, projecao e passou (do total e das categorias)",
+    "  controlai_api_definir_limite {p_valor, p_categoria?} -> limite do mês em diante; sem categoria é",
+    "                           o total; p_valor 0 remove",
     "  controlai_api_listar     {p_mes?, p_categoria?, p_limite?}",
     "  controlai_api_editar     {p_id, p_valor?, p_categoria?, p_data?, p_forma?, p_descricao?}",
     "  controlai_api_apagar     {p_id}",
@@ -1752,6 +1954,9 @@ function montaPromptIA(base, anon, token) {
     "em vez de p_valor. Boleto ou carnê: p_confirmar true. \"Paguei X\": contas_a_pagar",
     "para achar o id e depois marcar_pago.",
     "Mudar uma fixa é editar_fixa (cancelar e criar outra duplica o mês); quitar = cancelar_fixa + apagar as pendentes cobertas + lancar.",
+    "\"Quanto ainda posso gastar?\" é o orcamento do resumo. NUNCA extrapole o total por conta própria:",
+    "fixas e parcelas já estão lançadas desde o dia 1; use orcamento.projecao. Se lancar devolver",
+    "limites, diga quanto ficou livre.",
     "",
     "Confirme comigo antes de apagar qualquer coisa.",
   ].join("\n");

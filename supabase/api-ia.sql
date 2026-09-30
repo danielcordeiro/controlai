@@ -81,9 +81,11 @@ begin
   if v_nome = '' then
     raise exception 'Informe a categoria.';
   end if;
+  -- o mesmo nome pode existir como categoria e como subcategoria: vale a de 1º nível
   select c.id into v_id from controlai.category c
    where c.ledger_id = p_ledger and not c.archived
      and controlai.unaccent_simples(c.name) = controlai.unaccent_simples(v_nome)
+   order by c.parent_id is not null, c.created_at
    limit 1;
   if v_id is null then
     select c.id into v_id from controlai.category c
@@ -163,6 +165,9 @@ begin
 end;
 $$;
 
+-- 'limites': como ficaram o total e a categoria-topo lançada no mês da data,
+-- só os que têm limite vigente. O catch-up vem antes: sem as fixas do mês já
+-- gravadas, o livre sairia maior do que é.
 create or replace function public.controlai_api_lancar(
   p_token text, p_valor numeric, p_categoria text,
   p_data text default null, p_forma text default null, p_descricao text default null)
@@ -170,6 +175,7 @@ returns json language plpgsql security definer set search_path = controlai, publ
 declare v_ledger uuid; v_cat uuid; v_forma uuid; v_data date; v_cents integer; v_id uuid;
 begin
   v_ledger := controlai._por_token(p_token);
+  perform controlai._catchup_fixas(v_ledger);
   -- as faixas antes do ::integer: depois dele, o que passa do teto já virou
   -- erro cru do Postgres
   if p_valor is null or round(p_valor * 100) <= 0 then
@@ -193,12 +199,28 @@ begin
     'valor', round(v_cents / 100.0, 2),
     'categoria', (select name from controlai.category where id = v_cat),
     'forma_pagamento', (select name from controlai.payment_method where id = v_forma),
-    'descricao', left(coalesce(btrim(p_descricao), ''), 140));
+    'descricao', left(coalesce(btrim(p_descricao), ''), 140),
+    'limites', coalesce((
+      select json_agg(json_build_object('alvo', case when o.category_id is null then 'total' else c.name end,
+                                        'limite', round(o.limite_cents / 100.0, 2),
+                                        'livre', round(o.livre_cents / 100.0, 2),
+                                        'passou', o.livre_cents < 0)
+                      order by o.category_id nulls first)
+        from controlai._orcamento(v_ledger, to_char(v_data, 'YYYY-MM')) o
+        left join controlai.category c on c.id = o.category_id
+       where o.limite_cents is not null
+         and (o.category_id is null
+              or o.category_id = (select coalesce(x.parent_id, x.id) from controlai.category x
+                                   where x.id = v_cat))), '[]'::json));
 end;
 $$;
 
 -- 'total' é o que já aconteceu (pago + a pagar). Em mês futuro, o que as séries
 -- vão lançar vem à parte, em 'comprometido', e não há comparação com o anterior.
+-- 'orcamento' é controlai._orcamento em reais, o mesmo número do app: limite,
+-- livre, projeção (fixas e parcelas já estão lançadas desde o dia 1, então
+-- extrapolar o total inflaria a conta) e as categorias com limite. Sem limite,
+-- limite, livre, livre_por_dia e passou/vai_passar vêm nulos.
 create or replace function public.controlai_api_resumo(p_token text, p_mes text default null)
 returns json language plpgsql security definer set search_path = controlai, public, pg_temp as $$
 declare v_ledger uuid; v_ini date; v_fim date; v_mes text; v_total bigint; v_ant bigint;
@@ -246,7 +268,78 @@ begin
                 from controlai.expense e
                 left join controlai.payment_method m on m.id = e.payment_method_id
                where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim
-               group by 1) t), '[]'::json));
+               group by 1) t), '[]'::json),
+    'orcamento', (
+      with o as (select * from controlai._orcamento(v_ledger, v_mes))
+      select json_build_object(
+               'limite', round(t.limite_cents / 100.0, 2),
+               'gasto', round(t.gasto_cents / 100.0, 2),
+               'fixas_e_parcelas', round(t.serie_cents / 100.0, 2),
+               'comprometido', round(t.previsto_cents / 100.0, 2),
+               'livre', round(t.livre_cents / 100.0, 2),
+               'livre_por_dia', round(t.livre_dia_cents / 100.0, 2),
+               'projecao', round(t.projecao_cents / 100.0, 2),
+               'media_por_dia', round(t.media_dia_cents / 100.0, 2),
+               'passou', t.livre_cents < 0,
+               'vai_passar', t.projecao_cents > t.limite_cents,
+               -- quem passou primeiro, depois o maior consumo sobre o limite
+               'categorias', coalesce((
+                 select json_agg(json_build_object(
+                          'categoria', c.name,
+                          'limite', round(k.limite_cents / 100.0, 2),
+                          'gasto', round(k.gasto_cents / 100.0, 2),
+                          'fixas_e_parcelas', round(k.serie_cents / 100.0, 2),
+                          'comprometido', round(k.previsto_cents / 100.0, 2),
+                          'livre', round(k.livre_cents / 100.0, 2),
+                          'livre_por_dia', round(k.livre_dia_cents / 100.0, 2),
+                          'passou', k.livre_cents < 0)
+                        order by (k.gasto_cents + k.previsto_cents)::numeric / k.limite_cents desc, c.name)
+                   from o k join controlai.category c on c.id = k.category_id), '[]'::json))
+        from o t where t.category_id is null));
+end;
+$$;
+
+-- "Limite de R$ 3.000 no mês", "de 800 em Mercado": vale do mês atual em
+-- diante. 0 remove. A regra (1º nível, vigência) mora em controlai_set_limite;
+-- 'situacao' é o alvo no formato do orcamento de api_resumo (nula ao remover).
+create or replace function public.controlai_api_definir_limite(
+  p_token text, p_valor numeric, p_categoria text default null)
+returns json language plpgsql security definer set search_path = controlai, public, pg_temp as $$
+declare v_ledger uuid; v_cat uuid; v_nome text; v_cents integer; v_orc json;
+begin
+  v_ledger := controlai._por_token(p_token);
+  -- as faixas antes do ::integer (ver api_lancar)
+  if p_valor is null or round(p_valor * 100) < 0 then
+    raise exception 'Informe o limite em reais (0 remove).';
+  end if;
+  if round(p_valor * 100) > 2147483647 then
+    raise exception 'Valor grande demais.';
+  end if;
+  v_cents := nullif(round(p_valor * 100)::integer, 0);
+  if coalesce(btrim(p_categoria), '') <> '' then
+    -- a arquivada com limite continua no resumo; sem isto a IA a veria e não
+    -- conseguiria tirar o limite (_categoria_por_nome só olha as ativas)
+    select c.id into v_cat from controlai.category c
+      join controlai._limites(v_ledger, controlai._mes_atual()) l on l.category_id = c.id
+     where c.ledger_id = v_ledger and c.archived
+       and controlai.unaccent_simples(c.name) = controlai.unaccent_simples(btrim(p_categoria))
+     limit 1;
+    if v_cat is null then
+      v_cat := controlai._categoria_por_nome(v_ledger, p_categoria);
+    end if;
+    select name into v_nome from controlai.category where id = v_cat;
+  end if;
+  perform public.controlai_set_limite(v_ledger, v_cat, v_cents);
+  v_orc := public.controlai_api_resumo(p_token)->'orcamento';
+  return json_build_object(
+    'ok', true,
+    'categoria', v_nome,
+    'limite', round(v_cents / 100.0, 2),
+    'a_partir_de', controlai._mes_atual(),
+    'situacao', case when v_cents is null then null
+                     when v_cat is null then v_orc
+                     else (select k from json_array_elements(v_orc->'categorias') k
+                            where k->>'categoria' = v_nome) end);
 end;
 $$;
 

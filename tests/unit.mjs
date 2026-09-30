@@ -173,7 +173,7 @@ grupo("variacaoPct", () => {
 // ---------------------------------------------------------------- agregação do mês
 const {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
-  ritmoDoMes, resumoAPagar, andamentoFixa,
+  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal,
 } = await import("../js/report.js");
 
 const CATS = [
@@ -284,22 +284,73 @@ grupo("maioresDespesas", () => {
   eq(maioresDespesas([], 3).length, 0, "vazio");
 });
 
-grupo("ritmoDoMes (média por dia e projeção sem inflar com série)", () => {
-  const aluguel = { amount_cents: 150000, recurring_id: "r1", recurring_month: "2026-09", spent_on: "2026-09-07" };
-  // o bug de antes: R$ 1.500 no dia 7 virava R$ 6.428 de projeção e R$ 214 por dia
-  const so = ritmoDoMes([aluguel], "2026-09", "2026-09-07");
-  eq(so.projecao, 150000, "a série entra uma vez na projeção");
-  eq(so.mediaDia, 5000, "a série se espalha pelo mês na média por dia");
-  const mercado = { amount_cents: 7000, recurring_id: null, recurring_month: null, spent_on: "2026-09-03" };
-  eq(ritmoDoMes([aluguel, mercado], "2026-09", "2026-09-07").projecao, 150000 + 30000,
-    "só a avulsa é extrapolada (R$ 70 em 7 dias vira R$ 300 em 30)");
-  eq(ritmoDoMes([aluguel, mercado], "2026-09", "2026-09-06").projecao, null, "antes do 7º dia não projeta");
-  const fechado = ritmoDoMes([aluguel, mercado], "2026-08", "2026-09-07");
-  eq(fechado.projecao, null, "mês fechado não projeta");
-  eq(fechado.mediaDia, Math.round(157000 / 31), "mês fechado: total dividido pelos dias");
-  // excluir a regra solta a linha mas guarda o mês: continua sendo uma vez por mês
-  const solta = { amount_cents: 30000, recurring_id: null, recurring_month: "2026-09", spent_on: "2026-09-02" };
-  eq(ritmoDoMes([solta], "2026-09", "2026-09-10").projecao, 30000, "linha solta de série não é extrapolada");
+// a projeção e a média por dia saíram daqui: a regra mora em controlai._orcamento
+// e os casos (180000 no dia 7, null no dia 6...) estão em supabase/checks.sql
+grupo("linhasLimites (card Limites)", () => {
+  // livre vem do servidor; o consumo e o % são só de exibição
+  const item = (category_id, limite, gasto, previsto = 0) => ({
+    category_id, limite_cents: limite, gasto_cents: gasto, serie_cents: 0, previsto_cents: previsto,
+    livre_cents: limite == null ? null : limite - gasto - previsto, livre_dia_cents: null,
+    projecao_cents: null, media_dia_cents: null,
+  });
+  const orc = [
+    item(null, 500000, 400000),          // total: não vira linha
+    item("c2", 80000, 62000),            // 77,5% -> 77
+    item("c3", 50000, 50000),            // exatamente no limite: 100%, não passou
+    item("c1", 30000, 34500),            // passou R$ 45 -> 115%
+    item("c1a", 10000, 0),               // sem gasto aparece com 0
+    item("c1b", 99900, 99899),           // 99,99...% não pode virar 100
+  ];
+  const l = linhasLimites(orc, CATS);
+  eq(l.length, 5, "uma linha por categoria com limite, sem o total");
+  eq(l[0].id, "c1", "quem passou vem primeiro");
+  eq(l[0].passou, true, "livre < 0 é passou");
+  eq(l[0].pct, 115, "percentual acima de 100 continua aparecendo");
+  eq(l[0].barra, 100, "a barra para em 100");
+  eq(l[0].name, "Alimentação", "nome da categoria");
+  eq(l[0].color, "#ef4444", "cor da categoria");
+  eq(l[1].id, "c3", "depois o maior percentual");
+  eq(l[1].pct, 100, "no limite: 100%");
+  eq(l[1].passou, false, "chegar exatamente no limite não é passar");
+  eq(l[2].id, "c1b", "99,99% vem antes de 77%");
+  eq(l[2].pct, 99, "percentual com floor");
+  eq(l[3].pct, 77, "77,5% vira 77");
+  eq(l[4].consumo, 0, "categoria sem gasto aparece com 0");
+  eq(l[4].barra, 0, "barra vazia");
+  // mês futuro: consumo = lançado + previsto
+  const fut = linhasLimites([item("c2", 80000, 1000, 70000)], CATS)[0];
+  eq(fut.consumo, 71000, "no futuro o consumo soma o previsto");
+  eq(fut.previsto, 70000, "o previsto vai para o texto de comprometidos");
+  eq(fut.livre, 9000, "livre é o do servidor");
+  // empate no percentual: nome
+  const emp = linhasLimites([item("c3", 10000, 5000), item("c2", 10000, 5000)], CATS);
+  eq(emp.map((x) => x.id).join(), "c3,c2", "empate de % ordena pelo nome (Moradia < Transporte)");
+  eq(linhasLimites(undefined, CATS).length, 0, "snapshot sem orcamento (SQL antigo) não quebra");
+  eq(linhasLimites([item(null, null, 1000)], CATS).length, 0, "sem limite nenhum, card some");
+});
+
+grupo("barraDoTotal (barra em duas partes)", () => {
+  const t = (limite, gasto, serie, previsto = 0) => ({
+    category_id: null, limite_cents: limite, gasto_cents: gasto, serie_cents: serie, previsto_cents: previsto,
+  });
+  eq(barraDoTotal(t(null, 100000, 0)), null, "sem limite total, sem barra");
+  eq(barraDoTotal(null), null, "sem linha de total");
+  // dia 1: 85% já tomados por fixas e parcelas
+  const d1 = barraDoTotal(t(2000000, 1700000, 1700000));
+  eq(d1.pctSerie, 85, "a série ocupa 85% do limite");
+  eq(d1.pctDiaADia, 0, "o dia a dia ainda não começou");
+  const meio = barraDoTotal(t(200000, 180000, 150000));
+  eq(meio.serie, 150000, "parte da série");
+  eq(meio.diaADia, 30000, "dia a dia = gasto - série");
+  eq(meio.pctSerie + meio.pctDiaADia, 90, "as duas partes somam o consumo sobre o limite");
+  // passou: a escala vira o consumo e a barra enche sem estourar
+  const passou = barraDoTotal(t(100000, 200000, 150000));
+  eq(passou.pctSerie + passou.pctDiaADia, 100, "passou do limite: barra cheia");
+  eq(passou.pctSerie, 75, "proporção mantida na escala do consumo");
+  // futuro: o previsto entra na parte cinza e o lançado no dia a dia
+  const fut = barraDoTotal(t(300000, 10000, 0, 230000));
+  eq(fut.serie, 230000, "no futuro a parte cinza é o previsto");
+  eq(fut.diaADia, 10000, "e o dia a dia é o já lançado");
 });
 
 grupo("resumoAPagar (card A pagar)", () => {
