@@ -144,8 +144,9 @@ end;
 $$;
 
 -- Primeiro dia do mês a partir de 'YYYY-MM' (ou do mês corrente se vier vazio).
--- O fuso é constante de negócio. Estes dois são a única fonte: sem eles o
--- 'America/Sao_Paulo' se espalha por dezenas de expressões iguais.
+-- O fuso é constante de negócio. Estes dois são a fonte: sem eles o
+-- 'America/Sao_Paulo' se espalha por dezenas de expressões iguais. A única
+-- outra conversão é a da data de cadastro da série, em controlai._ocorrencias.
 create or replace function controlai._hoje()
 returns date language sql stable set search_path = pg_temp as $$
   select (now() at time zone 'America/Sao_Paulo')::date;
@@ -200,6 +201,41 @@ as $$
    where ledger_id = p_ledger
      and spent_on >= p_inicio
      and spent_on <  (p_inicio + interval '1 month')::date;
+$$;
+
+-- A data de uma linha pode ser esta? Uma regra só para o app e para a IA:
+-- - data inalterada passa (editar o valor da parcela do dia 20 no dia 5);
+-- - linha a pagar não muda de mês: a data dela é o vencimento, e mudar o mês a
+--   soltaria da série (skip no mês original, parcela a mais no novo);
+-- - o resto vai até amanhã (fuso). A exceção é a linha paga que já nasceu
+--   adiante (o dia da série cai à frente no mês corrente): ela pode vir para
+--   mais perto, sem sair do mês.
+create or replace function controlai._data_ok(
+  p_nova date, p_antiga date default null, p_a_pagar boolean default false)
+returns void
+language plpgsql
+stable
+set search_path = controlai, public, pg_temp
+as $$
+begin
+  if p_nova is null then
+    raise exception 'Informe a data da despesa.';
+  end if;
+  if p_nova = p_antiga then return; end if;
+  if p_a_pagar then
+    if date_trunc('month', p_nova) <> date_trunc('month', p_antiga) then
+      raise exception 'A data da parcela é o vencimento. Para registrar o pagamento, use Marcar como paga.';
+    end if;
+    return;   -- o vencimento pode mudar de dia dentro do mês, mesmo à frente de hoje
+  end if;
+  if p_nova > controlai._hoje() + 1 then
+    if p_antiga > controlai._hoje() + 1 and p_nova <= p_antiga
+       and date_trunc('month', p_nova) = date_trunc('month', p_antiga) then
+      return;
+    end if;
+    raise exception 'A data não pode ser no futuro.';
+  end if;
+end;
 $$;
 
 -- O objeto é mesmo desta carteira? Usado por TODA mutação: assim o segredo que
@@ -294,8 +330,11 @@ $$;
 
 -- Snapshot do mês ------------------------------------------------------------
 -- Uma chamada só entrega tudo que a tela precisa: carteira, plano de contas,
--- formas, despesas DO MÊS, total do mês anterior (comparação) e os meses que
--- têm lançamento (para o seletor não oferecer mês vazio).
+-- formas, despesas DO MÊS, fixas com andamento, total do mês anterior
+-- (comparação) e os meses que têm lançamento. Mais as contas a pagar: as
+-- pendentes da carteira inteira e as que vão pedir confirmação no mês que vem.
+-- Mês futuro não tem linha de série gravada: 'previstas' traz o que as séries
+-- vão lançar nele (em mês corrente ou passado, vem vazio).
 create or replace function public.controlai_mes(p_ledger uuid, p_mes text default null)
 returns json
 language plpgsql
@@ -341,9 +380,13 @@ begin
                                           'amount_cents', e.amount_cents, 'category_id', e.category_id,
                                           'payment_method_id', e.payment_method_id,
                                           'description', e.description,
-                                          'recurring_id', e.recurring_id)
+                                          'recurring_id', e.recurring_id,
+                                          'a_pagar', e.a_pagar, 'recurring_month', e.recurring_month,
+                                          'parcela', controlai._parcela(r, e.recurring_month),
+                                          'parcelas', r.total_meses)
                         order by e.spent_on desc, e.created_at desc)
           from controlai.expense e
+          left join controlai.recurring r on r.id = e.recurring_id
          where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim), '[]'::json),
     'fixas', coalesce((
         select json_agg(json_build_object(
@@ -354,11 +397,31 @@ begin
                  'ultimo_mes', u.ultimo,
                  'lancadas', (select count(*) from controlai.expense e where e.recurring_id = r.id),
                  'ativa', (r.cancelado_em is null
-                           and (u.ultimo is null or u.ultimo >= controlai._mes_atual())))
+                           and (u.ultimo is null or u.ultimo >= controlai._mes_atual())),
+                 'confirmar', r.confirmar, 'total_cents', r.total_cents,
+                 'pagas', a.pagas, 'pendentes', a.pendentes, 'pendentes_cents', a.pendentes_cents,
+                 'futuras', a.futuras, 'futuras_cents', a.futuras_cents)
                order by r.created_at)
           from controlai.recurring r
           cross join lateral (select controlai._fixa_ultimo_mes(r) as ultimo) u
+          cross join lateral controlai._andamento(r) a
          where r.ledger_id = v_ledger), '[]'::json),
+    'previstas', case when to_char(v_ini, 'YYYY-MM') > controlai._mes_atual()
+                      then controlai._previstas(v_ledger, to_char(v_ini, 'YYYY-MM'))
+                      else '[]'::json end,
+    'pendentes', coalesce((
+        select json_agg(json_build_object('id', p.id, 'spent_on', to_char(p.spent_on, 'YYYY-MM-DD'),
+                                          'amount_cents', p.amount_cents, 'description', p.description,
+                                          'category_id', p.category_id, 'recurring_id', p.recurring_id,
+                                          'recurring_month', p.recurring_month,
+                                          'parcela', controlai._parcela(r, p.recurring_month),
+                                          'parcelas', r.total_meses)
+                        order by p.spent_on, p.created_at)
+          from (select * from controlai.expense e
+                 where e.ledger_id = v_ledger and e.a_pagar
+                 order by e.spent_on, e.created_at limit 200) p
+          left join controlai.recurring r on r.id = p.recurring_id), '[]'::json),
+    'proximas', controlai._previstas(v_ledger, controlai._mes_add(controlai._mes_atual(), 1), true),
     'total_cents',      controlai._total_mes(v_ledger, v_ini),
     'total_anterior',   controlai._total_mes(v_ledger, (v_ini - interval '1 month')::date),
     'meses_com_gasto', coalesce((
@@ -419,12 +482,7 @@ begin
   if p_amount_cents is null or p_amount_cents <= 0 then
     raise exception 'O valor precisa ser maior que zero.';
   end if;
-  if p_spent_on is null then
-    raise exception 'Informe a data da despesa.';
-  end if;
-  if p_spent_on > controlai._hoje() + 1 then
-    raise exception 'A data não pode ser no futuro.';
-  end if;
+  perform controlai._data_ok(p_spent_on);
   -- a categoria PRECISA ser desta carteira (evita gravar em carteira alheia)
   if not exists (select 1 from controlai.category c
                   where c.id = p_category and c.ledger_id = v_ledger) then
@@ -461,12 +519,8 @@ begin
   if p_amount_cents is null or p_amount_cents <= 0 then
     raise exception 'O valor precisa ser maior que zero.';
   end if;
-  if p_spent_on is null then
-    raise exception 'Informe a data da despesa.';
-  end if;
-  if p_spent_on > controlai._hoje() + 1 then
-    raise exception 'A data não pode ser no futuro.';
-  end if;
+  perform controlai._data_ok(p_spent_on, e.spent_on, e.a_pagar)
+     from controlai.expense e where e.id = p_expense and e.ledger_id = v_ledger;
   perform controlai._pertence(v_ledger, 'category', p_category);
   if p_payment_method is not null then
     perform controlai._pertence(v_ledger, 'payment_method', p_payment_method);
@@ -798,3 +852,4 @@ revoke all on function controlai._mes_inicio(text)        from anon, authenticat
 revoke all on function controlai._ledger_ok(uuid)         from anon, authenticated, public;
 revoke all on function controlai._total_mes(uuid, date)   from anon, authenticated, public;
 revoke all on function controlai._pertence(uuid, text, uuid) from anon, authenticated, public;
+revoke all on function controlai._data_ok(date, date, boolean) from anon, authenticated, public;

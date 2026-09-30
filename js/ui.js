@@ -74,6 +74,25 @@ export function parseAmountToCents(str) {
   return Math.round(num * 100);
 }
 
+/**
+ * Divide um total em N parcelas do jeito do servidor: todas com a divisão
+ * inteira e a 1ª com o resto (R$ 1.000 em 3x = 333,34 + 333,33 + 333,33).
+ * Trocar a regra aqui sem trocar lá faria a prévia do formulário mentir.
+ */
+export function divideParcelas(totalCents, n) {
+  const parcela = Math.floor(totalCents / n);
+  return { parcela, primeira: totalCents - parcela * (n - 1) };
+}
+
+/** Prévia do parcelado: "10x de R$ 300,00 · total R$ 3.000,00" ou "1ª R$ 333,34 + 2x R$ 333,33 · total R$ 1.000,00". */
+export function previaParcelas(cents, n, ehTotal) {
+  const { parcela, primeira } = ehTotal ? divideParcelas(cents, n) : { parcela: cents, primeira: cents };
+  const vezes = primeira === parcela
+    ? `${n}x de ${fmtBRL(parcela)}`
+    : `1ª ${fmtBRL(primeira)} + ${n - 1}x ${fmtBRL(parcela)}`;
+  return `${vezes} · total ${fmtBRL(ehTotal ? cents : cents * n)}`;
+}
+
 // ---------------------------------------------------------------- datas e meses
 // Convenção: mês é sempre a string "YYYY-MM" e data é "YYYY-MM-DD" (sem fuso).
 // Tudo é manipulado como texto/UTC para o dia nunca "andar" por causa de timezone.
@@ -106,19 +125,6 @@ export function mesDe(dataISO) {
 }
 
 /** Soma (ou subtrai) meses a "YYYY-MM". mesAdd("2026-01", -1) => "2025-12". */
-/**
- * Quantos meses de `de` até `ate`, contando os dois. Aritmética, não laço:
- * a mesma conta que mesAdd faz por dentro.
- */
-export function mesesEntre(de, ate) {
-  const n = (m) => {
-    const [y, mm] = String(m).split("-").map(Number);
-    return y && mm ? y * 12 + mm : NaN;
-  };
-  const d = n(de), a = n(ate);
-  return Number.isFinite(d) && Number.isFinite(a) ? a - d + 1 : 0;
-}
-
 export function mesAdd(mes, delta) {
   const [y, m] = String(mes).split("-").map(Number);
   if (!y || !m) return mes;
@@ -126,6 +132,22 @@ export function mesAdd(mes, delta) {
   const ny = Math.floor(total / 12);
   const nm = total % 12;
   return `${ny}-${String(nm + 1).padStart(2, "0")}`;
+}
+
+/**
+ * Até que mês o › avança: a última parcela de cada série com fim e, na sem
+ * fim, o mês que vem (ou o início, se ela começa depois). `ultimo_mes` já
+ * desconta o cancelamento, então série acabada ou parada não abre o futuro.
+ * Sem série, o limite é o mês atual — o futuro não teria o que mostrar.
+ */
+export function limiteNavegacao(fixas, mesAtual) {
+  const proximo = mesAdd(mesAtual, 1);
+  let limite = mesAtual;
+  for (const f of fixas || []) {
+    const fim = f.ultimo_mes || (f.mes_inicio > proximo ? f.mes_inicio : proximo);
+    if (fim > limite) limite = fim;
+  }
+  return limite;
 }
 
 /** "2026-09" -> "setembro de 2026". */
@@ -161,6 +183,19 @@ export function diasNoMes(mes) {
   const [y, m] = String(mes).split("-").map(Number);
   if (!y || !m) return 30;
   return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/**
+ * min/max do campo de data ao editar uma linha, com a régua do servidor: a
+ * linha a pagar anda só dentro do mês do vencimento; a paga vai até amanhã
+ * (a folga do fuso) ou até a própria data, se a série a lançou mais à frente.
+ */
+export function limitesDataEdicao(d, hoje) {
+  const mes = mesDe(d.spent_on);
+  if (d.a_pagar) return { min: `${mes}-01`, max: `${mes}-${String(diasNoMes(mes)).padStart(2, "0")}` };
+  const [y, m, dia] = hoje.split("-").map(Number);
+  const amanha = new Date(Date.UTC(y, m - 1, dia + 1)).toISOString().slice(0, 10);
+  return { min: null, max: d.spent_on > hoje ? d.spent_on : amanha };
 }
 
 /** Variação percentual de `de` para `para`. Null quando não faz sentido comparar. */

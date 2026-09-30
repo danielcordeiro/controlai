@@ -19,8 +19,12 @@ A carteira abre em 4 abas:
 
 ### 📊 Mês
 - **Total do mês** e comparação com o mês anterior ("18% a mais que agosto").
+  Quando há parcela a pagar, o total se divide em **Pago · A pagar**.
 - **Cartões de resumo:** nº de lançamentos, média por dia, maior categoria e
-  **projeção do mês** (no mês corrente).
+  **projeção do mês** (no mês corrente). Só o gasto avulso é extrapolado; fixas
+  e parcelas entram uma vez.
+- **Mês futuro**: "Já comprometido" com as fixas e parcelas previstas, e quanto
+  delas ainda vai pedir confirmação.
 - **Rosca de gastos por categoria** (SVG puro, sem libs) com legenda e %.
 - **Barras por categoria**, com detalhamento das **subcategorias** quando existem.
 - **Por forma de pagamento** (quanto foi no Pix, no cartão...).
@@ -28,23 +32,47 @@ A carteira abre em 4 abas:
 
 ### 🧾 Despesas
 - Lançamentos **agrupados por dia**, com o total de cada dia.
+- Selos `fixa`, `3/10` (a parcela), `a pagar` e `atrasada`.
 - Toque para **editar** ou **excluir**.
 
-### 🔁 Despesas fixas (recorrentes)
-- No formulário da despesa, marque **Repetir todo mês** e escolha por quantas
-  vezes: `3x`, `6x`, `12x`, `24x`, **outro** (qualquer número até 600) ou
+### 🔁 Despesas fixas e parceladas
+- No formulário da despesa, marque **Repetir ou parcelar** e escolha por quantas
+  vezes: `3x`, `6x`, `10x`, `12x`, `24x`, **outro** (qualquer número até 600) ou
   **até você cancelar**.
-- A fixa é uma **regra**, não doze lançamentos adiantados: a ocorrência de cada
-  mês nasce quando aquele mês chega. O mês que vem nunca aparece pré-gasto.
-- **Dia 31 em mês de 30** cai no último dia do mês, não vaza para o seguinte.
-- **Apagar a ocorrência de um mês** vale só para aquele mês — a fixa continua e
-  não recria o que você apagou.
-- **Cancelar** para de lançar do mês que vem em diante e preserva o histórico;
-  **reativar** volta a lançar a partir do mês atual, sem ressuscitar os meses
-  em que ela esteve parada. **Excluir** apaga só a regra: os lançamentos já
-  feitos continuam, soltos da série.
+- Com número de vezes, o valor pode ser **da parcela** ou o **total**: o app
+  divide e mostra a prévia ("1ª R$ 333,34 + 2x R$ 333,33"). Os centavos que
+  sobram vão na 1ª parcela, e a soma fecha no total.
+- A série é uma **regra**, não dez lançamentos adiantados: a ocorrência de cada
+  mês é lançada quando aquele mês chega, **no dia da série** (15/10, 15/11...).
+  Dia 31 em mês de 30 cai no último dia do mês, não vaza para o seguinte.
+- **Os meses que vêm aparecem como "Já comprometido"**, separado do gasto:
+  "Gastei" continua sendo só o que já aconteceu.
+- **Cartão**: as parcelas já nascem pagas, a compra está feita. **Boleto ou
+  carnê**: marque *Preciso confirmar cada pagamento* e cada parcela nasce
+  **a pagar** — conta no gasto do mês do vencimento com o selo, vira `atrasada`
+  depois do vencimento e fica paga com **Marcar como paga** (dá para desfazer).
+  A opção vem desmarcada e vale também para fixa, não só para parcelado.
+- **Contas a pagar**: um card na aba Mês mostra as atrasadas, o que vence no mês
+  e a próxima. O toque abre a lista, por vencimento, com **Paguei** em cada uma
+  e o andamento de cada série a confirmar ("Geladeira — 3 de 10 pagas · falta
+  R$ 2.100").
+- **Parcelamento cadastrado em andamento**: as parcelas que venceram antes do
+  cadastro entram como pagas (são histórico). Se alguma não foi paga, *Voltar
+  para a pagar*.
+- **Apagar a ocorrência de um mês** vale só para aquele mês — a série continua e
+  não recria o que você apagou. Apagar uma parcela a pagar quer dizer "esta não
+  será paga"; se você pagou, é **Marcar como paga**.
+- **Cancelar** para de lançar do mês que vem em diante e preserva o histórico —
+  as parcelas a pagar continuam pendentes, a dívida não some. **Reativar** volta
+  a lançar a partir do mês atual, sem ressuscitar os meses em que ela esteve
+  parada. **Excluir** apaga só a regra e os lançamentos continuam, soltos da
+  série; para quem cadastrou errado, **apagar também os lançamentos** leva tudo.
+- **Quitar antecipado** não tem botão: cancele a série, apague as parcelas a
+  pagar que a quitação cobre e lance a quitação como despesa avulsa. Pagar
+  adiantado também não: a parcela se paga quando o mês dela chega.
 - Mudar o valor vale **daqui para frente**; o que já foi lançado fica como está.
-- A lista fica em **Ajustes**, com editar, pausar/reativar e excluir.
+- A lista fica em **Ajustes → Fixas e parceladas**, com o andamento, editar,
+  pausar/reativar e excluir.
 
 ### 🗂️ Categorias
 - **Plano de contas** de até 2 níveis (ex.: `Alimentação › Restaurante`).
@@ -56,7 +84,9 @@ A carteira abre em 4 abas:
   *Customize → Connectors → Add custom connector*. Aí é só falar:
   *"gastei 62 no mercado hoje"*, *"resumo do mês"*, *"quanto foi em transporte?"*,
   *"todo mês pago 1500 de aluguel"* (isso vira uma fixa, não um lançamento solto),
-  *"sobe o aluguel para 1650"* (edita a série, sem mexer no que já foi lançado).
+  *"sobe o aluguel para 1650"* (edita a série, sem mexer no que já foi lançado),
+  *"comprei uma TV em 10x de 300 no cartão"*, *"paguei a parcela da geladeira"*,
+  *"o que falta pagar?"*.
 - Para **Claude Code, Cursor ou ChatGPT**, um bloco de instruções para colar na
   conversa, que usa a API REST direto.
 - **Token separado do link**: revogar o acesso da IA não derruba o seu link, e
@@ -78,7 +108,8 @@ A carteira abre em 4 abas:
 ### Em todo o app
 - **Mobile-first**, com botão flutuante **＋ Despesa** sempre à mão.
 - Lançar leva poucos toques: valor → categoria → salvar (a data já vem hoje).
-- **Navegação entre meses** (‹ ›), sem oferecer mês futuro.
+- **Navegação entre meses** (‹ ›); com fixa ou parcelado ativo, o › vai até o
+  último mês previsto para mostrar o que já está comprometido.
 - Valores em **centavos inteiros** — sem erro de arredondamento.
 - Carteiras abertas neste aparelho ficam listadas na home.
 
@@ -111,10 +142,13 @@ js/
   ui.js               # DOM, dinheiro em centavos, datas/meses, toasts
   xlsx.js             # gerador de .xlsx (ZIP + OOXML), sem dependência
 supabase/
-  schema.sql          # tabelas + RPCs + permissões (rodar uma vez)
-  fixas.sql           # despesas fixas: tabelas, geração mês a mês e RPCs
+  schema.sql          # tabelas + RPCs + permissões (idempotente)
+  fixas.sql           # fixas e parceladas: tabelas, geração mês a mês,
+                      # projeção do futuro, contas a pagar e RPCs
                       # (roda depois do schema.sql, que já chama o que ele cria)
   api-ia.sql          # token e funções da API para IA
+  checks.sql          # asserts das fixas/parcelados para um Postgres
+                      # descartável — nunca o Supabase
   analytics.sql       # relatórios de uso separados dos do Rachaí
   functions/controlai-mcp/   # servidor MCP (Edge Function) do conector
 tests/unit.mjs        # testes das funções puras
@@ -157,6 +191,9 @@ npm test                         # testes das funções puras
 
 Não há build: é HTML + CSS + ES modules servidos estaticamente.
 
+Os asserts do SQL (fixas, parcelados, contas a pagar) rodam num Postgres
+descartável; o passo a passo está no cabeçalho de `supabase/checks.sql`.
+
 ---
 
 ## ☁️ Supabase
@@ -198,16 +235,32 @@ supabase functions deploy controlai-mcp --no-verify-jwt --project-ref wkuykhomuc
 `--no-verify-jwt` é obrigatório: o claude.ai não manda chave do Supabase, e a
 autenticação é o token `ctl_...` no fim da URL, validado dentro da função.
 
-Ferramentas expostas (11): `contexto`, `lancar_despesa`, `resumo_do_mes`,
+Ferramentas expostas (14): `contexto`, `lancar_despesa`, `resumo_do_mes`,
 `listar_despesas`, `editar_despesa`, `apagar_despesa`, `criar_fixa`,
-`editar_fixa`, `listar_fixas`, `cancelar_fixa`, `criar_categoria`.
+`lancar_parcelado`, `editar_fixa`, `listar_fixas`, `cancelar_fixa`,
+`marcar_pago`, `contas_a_pagar`, `criar_categoria`.
+
+Ao publicar uma versão, a ordem é **SQL → Edge Function → front**: todo parâmetro
+novo tem default, então a Edge e o front antigos continuam funcionando com o SQL
+novo, mas não o contrário. O SQL é `schema.sql`, `fixas.sql` e `api-ia.sql`
+**juntos, numa transação só** (veja abaixo): o `schema.sql` novo chama o que o
+`fixas.sql` cria, e aplicado sozinho deixaria o app no ar chamando função que
+ainda não existe.
 
 ### Se for clonar em outro projeto Supabase
-Rode nesta ordem (todos idempotentes): `supabase/schema.sql`,
-`supabase/fixas.sql`, `supabase/api-ia.sql` e `supabase/analytics.sql`. Depois
-publique a Edge Function e preencha o `config.js` a partir do `config.example.js`.
-A ordem importa: `schema.sql` cria funções que chamam o que `fixas.sql` define
-depois (corpo plpgsql não resolve nomes na criação, então isso é válido).
+Rode `supabase/schema.sql`, `supabase/fixas.sql` e `supabase/api-ia.sql`
+**juntos, numa transação**, e depois `supabase/analytics.sql` (todos
+idempotentes):
+
+```bash
+psql "$DATABASE_URL" -1 -v ON_ERROR_STOP=1 -f supabase/schema.sql -f supabase/fixas.sql -f supabase/api-ia.sql
+```
+
+No editor SQL do painel, cole os três juntos, nessa ordem, e rode de uma vez.
+Depois publique a Edge Function e preencha o `config.js` a partir do
+`config.example.js`. A ordem importa: `schema.sql` cria funções que chamam o que
+`fixas.sql` define depois (corpo plpgsql não resolve nomes na criação, então isso
+é válido); a transação garante que nunca fica um sem o outro.
 
 ---
 

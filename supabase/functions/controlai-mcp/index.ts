@@ -18,7 +18,7 @@
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-const VERSAO = "1.2.0";
+const VERSAO = "1.3.0";
 const PROTOCOLO_PADRAO = "2025-06-18";
 
 const CORS = {
@@ -79,6 +79,9 @@ const FERRAMENTAS: Ferramenta[] = [
     name: "resumo_do_mes",
     description:
       "Quanto foi gasto no mês, por categoria e por forma de pagamento, com o total do mês anterior e a variação. " +
+      "O total inclui as parcelas a pagar que vencem no mês; 'pago' e 'a_pagar' dividem esse total. Em mês futuro, " +
+      "'comprometido' é o que as fixas e os parcelados já preveem para ele ('comprometido_a_confirmar' é a parte que " +
+      "vai pedir confirmação de pagamento) e não há comparação com o mês anterior. " +
       "Mês no formato AAAA-MM; se omitido, o mês corrente. É a resposta para 'para onde foi meu dinheiro?'.",
     rpc: "controlai_api_resumo",
     inputSchema: {
@@ -91,9 +94,11 @@ const FERRAMENTAS: Ferramenta[] = [
   {
     name: "listar_despesas",
     description:
-      "Lista os lançamentos de um mês, do mais recente para o mais antigo, com o id de cada um e o campo " +
-      "'de_fixa' dizendo se o lançamento nasceu de uma despesa fixa. Use para achar o id antes de editar ou " +
-      "apagar. Pode filtrar por categoria.",
+      "Lista os lançamentos de um mês, do mais recente para o mais antigo, com o id de cada um. 'de_fixa' diz se " +
+      "nasceu de uma despesa fixa ou parcelada, 'parcela' mostra a posição na série ('3/10'; nulo em fixa sem " +
+      "número de meses) e 'a_pagar' diz se o pagamento ainda não foi confirmado. Em mês futuro vêm também as " +
+      "ocorrências previstas das séries ('prevista': true, sem id): ainda não existem, então não se editam, " +
+      "apagam nem marcam como pagas. Use para achar o id antes de editar ou apagar. Pode filtrar por categoria.",
     rpc: "controlai_api_listar",
     inputSchema: {
       type: "object",
@@ -136,8 +141,9 @@ const FERRAMENTAS: Ferramenta[] = [
     name: "apagar_despesa",
     description:
       "Apaga UM lançamento pelo id. Confirme com a pessoa antes de chamar. Se o lançamento veio de uma despesa fixa " +
-      "(listar_despesas marca com de_fixa), apagar vale só para aquele mês: a fixa continua e nos próximos meses " +
-      "lança de novo. Para parar a série inteira é 'cancelar_fixa', não esta.",
+      "ou parcelada (listar_despesas marca com de_fixa), apagar vale só para aquele mês: a série continua e nos " +
+      "próximos meses lança de novo. Apagar uma parcela a pagar quer dizer 'esta não será paga' — se a pessoa pagou, " +
+      "é 'marcar_pago', não esta. Para parar a série inteira é 'cancelar_fixa'.",
     rpc: "controlai_api_apagar",
     inputSchema: {
       type: "object",
@@ -149,38 +155,92 @@ const FERRAMENTAS: Ferramenta[] = [
   {
     name: "criar_fixa",
     description:
-      "Cria uma DESPESA FIXA (recorrente), para 'todo mês pago X'. Ela entra sozinha quando cada mês chega — nunca adianta " +
-      "o futuro. Informe 'meses' para um número de repetições (12, por exemplo) ou omita para repetir até cancelar. " +
-      "A ocorrência do mês corrente já é lançada.",
+      "Cria uma DESPESA FIXA (recorrente), para 'todo mês pago X'. É uma regra: a ocorrência de cada mês é lançada " +
+      "quando o mês chega, no dia da série, e os meses que vêm já aparecem como comprometidos. Informe 'meses' para " +
+      "um número de repetições (12, por exemplo) ou omita para repetir até cancelar. Informe exatamente um entre " +
+      "'valor' (de cada mês) e 'valor_total' (dividido pelos meses; exige 'meses'). Use confirmar=true quando cada " +
+      "pagamento precisa ser confirmado (boleto, carnê): as ocorrências nascem a pagar e a pessoa confirma cada uma " +
+      "com 'marcar_pago'. " +
+      "A ocorrência do mês corrente já é lançada. Compra parcelada é 'lancar_parcelado'.",
     rpc: "controlai_api_criar_fixa",
     inputSchema: {
       type: "object",
       properties: {
-        valor: { type: "number", description: "Valor em reais, ex.: 1500" },
+        valor: { type: "number", description: "Valor de cada mês em reais, ex.: 1500. Omita se informar valor_total." },
+        valor_total: { type: "number", description: "Total em reais, dividido pelos meses. Exige 'meses'. Omita se informar valor." },
         categoria: { type: "string", description: "Nome da categoria, ex.: Moradia" },
         dia: { type: "integer", description: "Dia do mês (1-31). Omita para o dia de hoje. Mês sem esse dia usa o último." },
         meses: { type: "integer", description: "Quantas vezes repetir. OMITA para repetir até a pessoa cancelar." },
         mes_inicio: { type: "string", description: "AAAA-MM do primeiro mês. Omita para começar neste mês." },
         forma_pagamento: { type: "string", description: "Opcional." },
         descricao: { type: "string", description: "Ex.: 'Aluguel'. Opcional, mas ajuda a reconhecer na lista." },
+        confirmar: { type: "boolean", description: "true quando cada pagamento precisa ser confirmado (boleto, carnê): as ocorrências nascem a pagar." },
       },
-      required: ["valor", "categoria"],
+      required: ["categoria"],
     },
     mapa: {
       valor: "p_valor",
+      valor_total: "p_valor_total",
       categoria: "p_categoria",
       dia: "p_dia",
       meses: "p_meses",
       mes_inicio: "p_mes_inicio",
       forma_pagamento: "p_forma",
       descricao: "p_descricao",
+      confirmar: "p_confirmar",
+    },
+  },
+  {
+    // mesma RPC de criar_fixa: parcelado é fixa finita. A ferramenta própria existe
+    // porque, sem ela, o modelo resolve "10x" com um lançamento do total ou com dez.
+    name: "lancar_parcelado",
+    description:
+      "Lança uma COMPRA PARCELADA ('TV em 10x no cartão', 'geladeira em 12 boletos'): uma série com o número de " +
+      "parcelas, nunca um lançamento do total nem um lançamento por parcela. Se a pessoa não disse em quantas vezes, " +
+      "PERGUNTE antes de chamar. Informe exatamente um entre 'valor_parcela' e 'valor_total' (o servidor divide o " +
+      "total; os centavos que sobram vão na 1ª parcela). No cartão de crédito as parcelas já nascem pagas, porque a " +
+      "compra está feita. No boleto ou carnê use confirmar=true: cada parcela nasce a pagar e a pessoa confirma com " +
+      "'marcar_pago' quando pagar. Parcelamento já em andamento: informe o mes_inicio passado; as parcelas que " +
+      "venceram antes de hoje entram como pagas. As parcelas dos meses que vêm aparecem como comprometidas.",
+    rpc: "controlai_api_criar_fixa",
+    inputSchema: {
+      type: "object",
+      properties: {
+        parcelas: { type: "integer", minimum: 2, description: "Em quantas vezes, ex.: 10." },
+        valor_parcela: { type: "number", description: "Valor de cada parcela em reais. Omita se informar valor_total." },
+        valor_total: { type: "number", description: "Valor total da compra em reais. Omita se informar valor_parcela." },
+        categoria: { type: "string", description: "Nome da categoria, ex.: Moradia" },
+        dia: {
+          type: "integer",
+          description: "Dia de cada parcela (1-31): no cartão, o da compra; no boleto, o do vencimento. Omita para o dia de hoje.",
+        },
+        mes_inicio: {
+          type: "string",
+          description: "AAAA-MM da 1ª parcela: no cartão, o mês da compra; no boleto ou carnê, o mês do 1º vencimento. Omita para este mês.",
+        },
+        forma_pagamento: { type: "string", description: "Ex.: Cartão de crédito, Boleto. Opcional." },
+        descricao: { type: "string", description: "Ex.: 'TV', 'Geladeira'. Opcional, mas ajuda a reconhecer a série." },
+        confirmar: { type: "boolean", description: "true no boleto ou carnê: cada parcela nasce a pagar. Omita no cartão." },
+      },
+      required: ["parcelas", "categoria"],
+    },
+    mapa: {
+      parcelas: "p_meses",
+      valor_parcela: "p_valor",
+      valor_total: "p_valor_total",
+      categoria: "p_categoria",
+      dia: "p_dia",
+      mes_inicio: "p_mes_inicio",
+      forma_pagamento: "p_forma",
+      descricao: "p_descricao",
+      confirmar: "p_confirmar",
     },
   },
   {
     name: "editar_fixa",
     description:
-      "Altera uma despesa fixa daqui para frente; o que já foi lançado NÃO muda. Pegue o id em listar_fixas e " +
-      "informe só os campos que mudam. Para tirar o prazo e deixar rodando até cancelar, use ate_cancelar=true.",
+      "Altera uma despesa fixa ou parcelada daqui para frente; o que já foi lançado NÃO muda. Pegue o id em " +
+      "listar_fixas e informe só os campos que mudam. Para tirar o prazo e deixar rodando até cancelar, use ate_cancelar=true.",
     rpc: "controlai_api_editar_fixa",
     inputSchema: {
       type: "object",
@@ -193,6 +253,10 @@ const FERRAMENTAS: Ferramenta[] = [
         ate_cancelar: { type: "boolean", description: "true tira o prazo: passa a repetir até a pessoa cancelar." },
         forma_pagamento: { type: "string", description: "Nova forma de pagamento." },
         descricao: { type: "string", description: "Nova descrição." },
+        confirmar: {
+          type: "boolean",
+          description: "true: as próximas ocorrências pedem confirmação de pagamento; false: nascem pagas. Omita para manter.",
+        },
       },
       required: ["id"],
     },
@@ -205,12 +269,16 @@ const FERRAMENTAS: Ferramenta[] = [
       ate_cancelar: "p_ate_cancelar",
       forma_pagamento: "p_forma",
       descricao: "p_descricao",
+      confirmar: "p_confirmar",
     },
   },
   {
     name: "listar_fixas",
     description:
-      "Lista as despesas fixas da carteira, com valor, dia, quantas já foram lançadas, quantas faltam e se ainda estão ativas.",
+      "Lista as despesas fixas e parceladas da carteira, com valor, dia, repetições, se ainda estão ativas, se pedem " +
+      "confirmação de pagamento ('confirmar'), 'valor_total' (o total informado ou, sem ele, parcela × meses) e o " +
+      "andamento: 'pagas', 'pendentes', 'restantes' e 'falta' (quanto ainda falta pagar, em reais). 'valor_total' " +
+      "vem nulo em série sem número de meses; 'restantes' e 'falta', em série sem fim (não cancelada).",
     rpc: "controlai_api_listar_fixas",
     inputSchema: { type: "object", properties: {}, required: [] },
     mapa: {},
@@ -218,8 +286,9 @@ const FERRAMENTAS: Ferramenta[] = [
   {
     name: "cancelar_fixa",
     description:
-      "Para de lançar uma despesa fixa a partir do mês que vem. O que já foi lançado continua no histórico. " +
-      "Pegue o id em listar_fixas e confirme com a pessoa antes.",
+      "Para de lançar uma despesa fixa ou parcelada a partir do mês que vem. O que já foi lançado continua no " +
+      "histórico, e as parcelas a pagar continuam pendentes: a dívida não some. Pegue o id em listar_fixas e " +
+      "confirme com a pessoa antes.",
     rpc: "controlai_api_cancelar_fixa",
     inputSchema: {
       type: "object",
@@ -227,6 +296,35 @@ const FERRAMENTAS: Ferramenta[] = [
       required: ["id"],
     },
     mapa: { id: "p_id" },
+  },
+  {
+    name: "marcar_pago",
+    description:
+      "Marca um lançamento como pago (pago=true, o padrão) ou volta para a pagar (pago=false, só em lançamento de " +
+      "fixa ou parcelado: avulso é sempre pago). Para 'paguei a parcela da geladeira', ache o id em contas_a_pagar e " +
+      "chame esta. A data não muda: a da parcela é o vencimento. Não existe pagar adiantado: a parcela de um mês " +
+      "futuro ainda não tem id e só pode ser paga quando o mês dela chegar.",
+    rpc: "controlai_api_marcar_pago",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "id do lançamento (uuid)" },
+        pago: { type: "boolean", description: "true marca como pago (padrão); false volta para a pagar." },
+      },
+      required: ["id"],
+    },
+    mapa: { id: "p_id", pago: "p_pago" },
+  },
+  {
+    name: "contas_a_pagar",
+    description:
+      "O que falta pagar na carteira: 'atrasadas' (vencimento antes de hoje) e 'vencem_este_mes', cada uma com id, " +
+      "e os totais de cada grupo; 'proximas' traz as do mês que vem que vão pedir confirmação (ainda sem id); " +
+      "'series' traz o andamento só das séries que pedem confirmação (boleto, carnê); o parcelado no cartão está " +
+      "em listar_fixas. É a resposta para 'o que falta pagar?' e o jeito de achar o id antes de 'marcar_pago'.",
+    rpc: "controlai_api_contas_a_pagar",
+    inputSchema: { type: "object", properties: {}, required: [] },
+    mapa: {},
   },
   {
     name: "criar_categoria",
@@ -322,7 +420,12 @@ async function trata(msg: Record<string, unknown>, token: string): Promise<unkno
             "Controle de despesas pessoais do Controlaí. Valores em reais e categorias pelo nome. " +
             "Chame 'contexto' no início para saber quais categorias existem. Para 'quanto gastei este mês', use " +
             "'resumo_do_mes'. Gasto que se repete todo mês (aluguel, assinatura) é 'criar_fixa', não uma despesa por " +
-            "mês. Para mudar uma fixa use 'editar_fixa': cancelar e criar outra duplicaria o lançamento deste mês.",
+            "mês. Compra parcelada ('10x', 'em 12 boletos') é 'lancar_parcelado', nunca um lançamento do total nem " +
+            "um por parcela; se a pessoa não disse em quantas vezes, pergunte. Boleto e carnê levam confirmar=true " +
+            "(cada parcela nasce a pagar); no cartão as parcelas já nascem pagas. 'Paguei X' é 'contas_a_pagar' para " +
+            "achar o id e 'marcar_pago' nele. 'O que falta pagar?' é 'contas_a_pagar'. Quitar um parcelado é " +
+            "'cancelar_fixa', 'apagar_despesa' em cada parcela pendente que a quitação cobre e 'lancar_despesa' com o " +
+            "valor pago. Para mudar uma fixa use 'editar_fixa': cancelar e criar outra duplicaria o lançamento deste mês.",
         },
       };
     }

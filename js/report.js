@@ -1,6 +1,7 @@
 // Agregações do mês — funções PURAS (sem DOM, sem rede), exercitadas por tests/unit.mjs.
 // Todas recebem a lista de despesas do mês já carregada pelo snapshot e devolvem
 // linhas prontas para desenhar. Valores sempre em centavos inteiros.
+import { diasNoMes, mesDe, fmtBRL } from "./ui.js";
 
 export const SEM_CATEGORIA = { id: null, name: "Sem categoria", color: "#9ca3af" };
 export const SEM_FORMA = { id: null, name: "Não informada" };
@@ -162,6 +163,60 @@ export function maioresDespesas(despesas, n = 5) {
   return [...(despesas || [])]
     .sort((a, b) => (b.amount_cents || 0) - (a.amount_cents || 0))
     .slice(0, Math.max(0, n));
+}
+
+/**
+ * Média por dia e projeção do mês. Só a despesa avulsa é extrapolada: a de
+ * série (fixa, parcela — inclusive a solta de uma regra excluída, que guarda
+ * o mês) acontece uma vez por mês. Extrapolar tudo fazia um aluguel de
+ * R$ 1.500 no dia 7 virar R$ 6.428 de projeção e R$ 214 "por dia".
+ * Mês fechado: total ÷ dias. Projeção só no mês corrente e a partir do 7º dia —
+ * antes disso a média de dois ou três dias não significa nada.
+ */
+export function ritmoDoMes(despesas, mes, hoje) {
+  const dias = diasNoMes(mes);
+  const corrente = mesDe(hoje) === mes;
+  const diaAtual = corrente ? Number(hoje.slice(8, 10)) : dias;
+  let serie = 0, avulsas = 0;
+  for (const d of despesas || []) {
+    if (d.recurring_id || d.recurring_month) serie += d.amount_cents || 0;
+    else avulsas += d.amount_cents || 0;
+  }
+  const mesInteiro = serie + (avulsas * dias) / diaAtual;
+  return {
+    mediaDia: Math.round(mesInteiro / dias),
+    projecao: corrente && diaAtual >= 7 ? Math.round(mesInteiro) : null,
+  };
+}
+
+/**
+ * O card "A pagar": pendentes vencidas e as que ainda vencem, com as somas, e a
+ * próxima ocorrência a confirmar do mês que vem. Nenhuma linha de série existe
+ * depois do mês corrente, então a pendente que não atrasou vence este mês.
+ */
+export function resumoAPagar(pendentes, proximas, hoje) {
+  const atrasadas = (pendentes || []).filter((d) => d.spent_on < hoje);
+  const esteMes = (pendentes || []).filter((d) => d.spent_on >= hoje);
+  const proxima = [...(proximas || [])].sort((a, b) => a.spent_on.localeCompare(b.spent_on))[0] || null;
+  return {
+    atrasadas, esteMes, proxima,
+    atrasadasCents: totalCentavos(atrasadas),
+    esteMesCents: totalCentavos(esteMes),
+  };
+}
+
+/**
+ * Andamento de uma série, com os números que o servidor tira das linhas e das
+ * ocorrências que faltam — nunca N × valor, que skip e quitação quebrariam.
+ * "3 de 10 pagas · falta R$ 2.100,00"; série sem fim mostra só as pendentes.
+ */
+export function andamentoFixa(f) {
+  const pend = f.pendentes || 0;
+  if (f.futuras == null) {
+    return pend ? `${pend} pendente${pend === 1 ? "" : "s"} · ${fmtBRL(f.pendentes_cents || 0)}` : "";
+  }
+  const falta = (f.pendentes_cents || 0) + (f.futuras_cents || 0);
+  return `${f.pagas || 0} de ${(f.pagas || 0) + pend + f.futuras} pagas${falta ? ` · falta ${fmtBRL(falta)}` : ""}`;
 }
 
 /** Monta o CSV do período (Excel/Sheets abrem direto; separador ponto e vírgula). */

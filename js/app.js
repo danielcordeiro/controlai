@@ -3,13 +3,19 @@
 import { db, auth, isConfigured, chegouDoEmail, erroDoEmail } from "./db.js";
 import {
   el, clear, fmtBRL, fmtBRLCurto, parseAmountToCents, toast, confirmAction, copyText,
-  hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, diasNoMes, variacaoPct,
-  downloadText, downloadBytes, MAX_CENTAVOS, mesesEntre, acaoUnica,
+  hojeISO, mesDe, mesAdd, mesExtenso, dataExtenso, dataCurta, variacaoPct,
+  downloadText, downloadBytes, MAX_CENTAVOS, acaoUnica, limiteNavegacao, previaParcelas,
+  limitesDataEdicao,
 } from "./ui.js";
 import {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
+  ritmoDoMes, resumoAPagar, andamentoFixa,
 } from "./report.js";
 import { despesasParaXLSX } from "./xlsx.js";
+
+// Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
+// conferir no aparelho que a versão nova chegou.
+const VERSAO = "1.3.0";
 
 const root = () => document.getElementById("app");
 
@@ -520,10 +526,17 @@ function tabBtn(key, label) {
   });
 }
 
+/** O mês aberto ainda não chegou: a tela mostra o comprometido, não o gasto. */
+const ehFuturo = () => state.mes > mesDe(hojeISO());
+
 function navegadorMes() {
   const s = state.snapshot;
   const mesAtual = mesDe(hojeISO());
   const proximo = mesAdd(state.mes, 1);
+  const legenda = state.trocandoMes ? "carregando..."
+    : state.mes === mesAtual ? "mês atual"
+    : state.mes > mesAtual ? "previsão · toque para voltar ao mês atual"
+    : "toque para voltar ao mês atual";
   return el("div", { class: `monthnav ${state.trocandoMes ? "monthnav--carregando" : ""}` }, [
     el("button", {
       class: "monthnav__btn", text: "‹", "aria-label": "Mês anterior",
@@ -532,13 +545,14 @@ function navegadorMes() {
     }),
     el("div", { class: "monthnav__mid", onClick: () => irParaMes(mesAtual) }, [
       el("div", { class: "monthnav__label", text: mesExtenso(state.mes) }),
-      el("div", { class: "monthnav__total", text: state.trocandoMes ? "carregando..." : (state.mes === mesAtual ? "mês atual" : "toque para voltar ao mês atual") }),
+      el("div", { class: "monthnav__total", text: legenda }),
     ]),
     el("button", {
       class: "monthnav__btn",
       text: "›",
       "aria-label": "Próximo mês",
-      disabled: state.trocandoMes || proximo > mesAtual,
+      // o futuro só vai até onde alguma série ainda tem ocorrência
+      disabled: state.trocandoMes || proximo > limiteNavegacao(s.fixas, mesAtual),
       onClick: () => irParaMes(proximo),
     }),
   ]);
@@ -576,13 +590,17 @@ function cardApoio() {
 
 function abaMes() {
   const s = state.snapshot;
+  // antes do "Nenhuma despesa": o mês futuro sem linha real ainda tem previstas
+  if (ehFuturo()) return abaMesFuturo();
   const desp = s.expenses || [];
   const total = s.total_cents ?? totalCentavos(desp);
   const anterior = s.total_anterior ?? 0;
+  const aPagar = totalCentavos(desp.filter((d) => d.a_pagar));
 
   if (!desp.length) {
     return el("div", {}, [
-      cardTotal(total, anterior),
+      cardTotal(total, anterior, aPagar),
+      cardAPagar(),
       el("div", { class: "card empty" }, [
         el("h2", { text: "Nenhuma despesa neste mês" }),
         el("p", { text: "Toque em “＋ Despesa” para lançar a primeira." }),
@@ -594,16 +612,11 @@ function abaMes() {
   const cats = porCategoria(desp, s.categories || []);
   const formas = porFormaPagamento(desp, s.payment_methods || []);
   const maiores = maioresDespesas(desp, 5);
-  const dias = diasNoMes(state.mes);
-  const hoje = hojeISO();
-  const diaAtual = mesDe(hoje) === state.mes ? Number(hoje.slice(8, 10)) : dias;
-  const mediaDia = diaAtual > 0 ? Math.round(total / diaAtual) : 0;
-  // Projetar o mês inteiro a partir de 2 ou 3 dias transforma o aluguel do dia 1
-  // num número absurdo. Só a partir de uma semana a média começa a significar algo.
-  const projecao = mesDe(hoje) === state.mes && diaAtual >= 7 ? mediaDia * dias : null;
+  const { mediaDia, projecao } = ritmoDoMes(desp, state.mes, hojeISO());
 
   return el("div", {}, [
-    cardTotal(total, anterior),
+    cardTotal(total, anterior, aPagar),
+    cardAPagar(),
 
     el("div", { class: "kpis" }, [
       kpi(String(desp.length), desp.length === 1 ? "lançamento" : "lançamentos"),
@@ -645,7 +658,161 @@ function abaMes() {
   ]);
 }
 
-function cardTotal(total, anterior) {
+/**
+ * Mês futuro: nada aconteceu ainda, então não há "gastei" nem KPI. O card mostra
+ * o que as séries já comprometem (previstas: calculadas, nunca gravadas) e, à
+ * parte, o que já foi lançado de verdade no mês (a avulsa de amanhã, no dia 30).
+ */
+function abaMesFuturo() {
+  const s = state.snapshot;
+  const previstas = s.previstas || [];
+  const reais = s.expenses || [];
+  const todas = [...reais, ...previstas];
+  const comprometido = totalCentavos(previstas);
+  const aConfirmar = totalCentavos(previstas.filter((p) => p.a_pagar));
+  const lancado = totalCentavos(reais);
+  const cats = porCategoria(todas, s.categories || []);
+  const catMap = new Map((s.categories || []).map((c) => [c.id, c]));
+  const formas = new Map((s.payment_methods || []).map((f) => [f.id, f]));
+  const hoje = hojeISO();
+
+  return el("div", {}, [
+    el("div", { class: "total total--futuro" }, [
+      el("div", { class: "total__label", text: `Já comprometido em ${mesExtenso(state.mes)}` }),
+      el("div", { class: "total__value", text: fmtBRL(comprometido) }),
+      aConfirmar ? el("div", { class: "total__cmp", text: `${fmtBRL(aConfirmar)} a confirmar` }) : null,
+      lancado ? el("div", { class: "total__cmp", text: `Já lançado ${fmtBRL(lancado)}` }) : null,
+    ]),
+    todas.length
+      ? el("div", {}, [
+          el("h3", { class: "section", text: "Para onde vai o dinheiro" }),
+          donutCard(cats, comprometido + lancado),
+          el("ul", { class: "catlist", style: "margin-top:12px" }, cats.map((c) => linhaCategoria(c, cats[0].cents))),
+          el("h3", { class: "section", text: "Vencimentos" }),
+          el("div", {}, [...todas].sort((a, b) => a.spent_on.localeCompare(b.spent_on))
+            .map((d) => linhaDespesa(d, catMap, formas, hoje))),
+        ])
+      : vazioFuturo(),
+  ]);
+}
+
+function vazioFuturo() {
+  return el("div", { class: "card empty" }, [
+    el("h2", { text: "Nada previsto para este mês" }),
+    el("p", { text: "Parcelas e fixas aparecem aqui antes de o mês chegar." }),
+  ]);
+}
+
+/**
+ * Contas a pagar da carteira inteira, não só do mês aberto: a parcela atrasada
+ * de agosto precisa aparecer em setembro. Some quando não há pendente nem série
+ * ativa que peça confirmação.
+ */
+function cardAPagar() {
+  const s = state.snapshot;
+  const pendentes = s.pendentes || [];
+  if (!pendentes.length && !(s.fixas || []).some((f) => f.confirmar && f.ativa)) return null;
+  const hoje = hojeISO();
+  const r = resumoAPagar(pendentes, s.proximas, hoje);
+  const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
+  // o card é da carteira inteira: aberto num mês passado, "este mês" seria mentira
+  const quando = state.mes === mesDe(hoje) ? "este mês" : `em ${mesExtenso(mesDe(hoje))}`;
+  const linhas = [
+    r.atrasadas.length
+      ? el("div", { class: "apagar__atraso", text: `${plural(r.atrasadas.length, "atrasada", "atrasadas")} · ${fmtBRL(r.atrasadasCents)}` })
+      : null,
+    r.esteMes.length
+      ? el("div", { text: `${plural(r.esteMes.length, "vence", "vencem")} ${quando} · ${fmtBRL(r.esteMesCents)}` })
+      : null,
+    r.proxima
+      ? el("div", { class: "muted", text: `Próximo: ${nomeDe(r.proxima)} ${dataCurta(r.proxima.spent_on)} · ${fmtBRL(r.proxima.amount_cents)}` })
+      : null,
+  ].filter(Boolean);
+  return el("button", { class: "apagar", type: "button", "aria-haspopup": "dialog", onClick: () => abrirContasAPagar() }, [
+    el("span", { class: "apagar__head" }, [
+      el("span", { class: "apagar__title", text: "A pagar" }),
+      el("span", { class: "exp__chevron", "aria-hidden": "true", text: "›" }),
+    ]),
+    ...(linhas.length ? linhas : [el("div", { class: "muted", text: "Nada pendente agora." })]),
+  ]);
+}
+
+/**
+ * Folha "Contas a pagar". "Paguei" não tira a linha da lista: ela fica como
+ * "paga · desfazer" até a folha fechar, para um toque errado ter volta. A tela
+ * de trás recarrega em segundo plano a cada toque.
+ */
+function abrirContasAPagar() {
+  const s = state.snapshot;
+  const hoje = hojeISO();
+  // o snapshot não repete a_pagar nas pendentes: todas são, por definição
+  const pendentes = (s.pendentes || []).map((d) => ({ ...d, a_pagar: true }));
+  const proximas = s.proximas || [];
+  const series = (s.fixas || []).filter((f) => f.confirmar && (f.ativa || f.pendentes));
+  // a série quitada agora continua na lista, como a linha paga: só os números mudam
+  const idsSeries = new Set(series.map((f) => f.id));
+  const andamento = el("ul", { class: "list" });
+  function desenhaAndamento() {
+    clear(andamento);
+    andamento.append(...(state.snapshot?.fixas || []).filter((f) => idsSeries.has(f.id)).map((f) =>
+      el("li", { class: "list__item" }, [
+        el("div", { style: "flex:1;min-width:0" }, [
+          el("div", { class: "list__name", text: nomeDe(f) }),
+          el("div", { class: "list__sub", text: andamentoFixa(f) || "nada pendente" }),
+        ]),
+      ])));
+  }
+  desenhaAndamento();
+
+  const info = (d) => el("div", { style: "flex:1;min-width:0" }, [
+    el("div", { class: "list__name", text: nomeDe(d) }),
+    el("div", { class: "list__sub" }, [
+      ...tagsDespesa(d, hoje),
+      `vence ${dataCurta(d.spent_on)} · ${fmtBRL(d.amount_cents)}`,
+    ]),
+  ]);
+
+  function linhaPendente(d) {
+    let paga = false;
+    const acao = el("div", { class: "list__actions" });
+    const li = el("li", { class: "list__item" }, [info(d), acao]);
+    const alterna = acaoUnica(async () => {
+      try {
+        await db.marcarPago(state.ledgerId, d.id, !paga);
+        paga = !paga;
+        desenha();
+        acao.querySelector("button")?.focus();   // o botão tocado acabou de ser trocado
+        recarregar().then(desenhaAndamento);
+      } catch (e) { toast(e.message, "error"); }
+    });
+    function desenha() {
+      clear(acao);
+      li.classList.toggle("list__item--paga", paga);
+      acao.append(...(paga
+        ? [el("span", { class: "small muted", text: "paga ·" }),
+           el("button", { class: "btn btn--ghost btn--sm", type: "button", text: "desfazer",
+             "aria-label": `Desfazer: ${nomeDe(d)} volta para a pagar`, onClick: alterna })]
+        : [el("button", { class: "btn btn--primary btn--sm", type: "button", text: "Paguei",
+             "aria-label": `Paguei ${nomeDe(d)}, ${fmtBRL(d.amount_cents)}`, onClick: alterna })]));
+    }
+    desenha();
+    return li;
+  }
+
+  openModal("Contas a pagar", el("div", {}, [
+    pendentes.length
+      ? el("ul", { class: "list" }, pendentes.map(linhaPendente))
+      : el("p", { class: "muted", style: "margin:4px 0 0", text: "Nenhuma conta pendente." }),
+    proximas.length ? el("h3", { class: "section", text: "Próximo mês" }) : null,
+    proximas.length
+      ? el("ul", { class: "list" }, proximas.map((d) => el("li", { class: "list__item list__item--prevista" }, [info(d)])))
+      : null,
+    series.length ? el("h3", { class: "section", text: "Andamento" }) : null,
+    series.length ? andamento : null,
+  ]));
+}
+
+function cardTotal(total, anterior, aPagar) {
   const varPct = variacaoPct(total, anterior);
   let cmp = null;
   if (varPct == null) {
@@ -663,6 +830,8 @@ function cardTotal(total, anterior) {
   return el("div", { class: "total" }, [
     el("div", { class: "total__label", text: `Total de ${mesExtenso(state.mes)}` }),
     el("div", { class: "total__value", text: fmtBRL(total) }),
+    // a parcela a pagar conta no mês do vencimento; a divisão só aparece se houver
+    aPagar ? el("div", { class: "total__pago", text: `Pago ${fmtBRL(total - aPagar)} · A pagar ${fmtBRL(aPagar)}` }) : null,
     cmp ? el("div", { class: "total__cmp", text: cmp }) : null,
   ]);
 }
@@ -733,15 +902,18 @@ function linhaCategoria(c, maiorValor) {
 // ---- aba DESPESAS ----------------------------------------------------------
 function abaDespesas() {
   const s = state.snapshot;
-  const desp = s.expenses || [];
+  // o ramo do futuro vem antes do "Nenhuma despesa": lá as previstas contam
+  const futuro = ehFuturo();
+  const desp = [...(s.expenses || []), ...(futuro ? s.previstas || [] : [])];
   if (!desp.length) {
-    return el("div", { class: "card empty" }, [
+    return futuro ? vazioFuturo() : el("div", { class: "card empty" }, [
       el("h2", { text: "Nenhuma despesa neste mês" }),
       el("p", { text: "Toque em “＋ Despesa” para lançar a primeira." }),
     ]);
   }
   const cats = new Map((s.categories || []).map((c) => [c.id, c]));
   const formas = new Map((s.payment_methods || []).map((f) => [f.id, f]));
+  const hoje = hojeISO();
 
   return el("div", {}, porDia(desp).map((g) =>
     el("section", { class: "daygroup" }, [
@@ -749,31 +921,53 @@ function abaDespesas() {
         el("span", { class: "daygroup__day", text: dataExtenso(g.dia) }),
         el("span", { class: "daygroup__sum", text: fmtBRL(g.cents) }),
       ]),
-      ...g.itens.map((d) => {
-        const cat = cats.get(d.category_id);
-        const pai = cat?.parent_id ? cats.get(cat.parent_id) : null;
-        const nomeCat = cat ? (pai ? `${pai.name} › ${cat.name}` : cat.name) : "Sem categoria";
-        const forma = d.payment_method_id ? formas.get(d.payment_method_id)?.name : null;
-        // a linha INTEIRA é o alvo: no celular ninguém acerta um texto de 4 letras
-        return el("button", {
-          class: "exp", type: "button",
-          "aria-label": `Editar ${d.description || nomeCat}, ${fmtBRL(d.amount_cents)}`,
-          onClick: () => abrirFormDespesa(d),
-        }, [
-          el("span", { class: "exp__dot", style: `background:${(pai || cat)?.color || "#9ca3af"}` }),
-          el("div", { class: "exp__main" }, [
-            el("div", { class: "exp__desc", text: d.description || nomeCat }),
-            el("div", { class: "exp__meta" }, [
-              d.recurring_id ? el("span", { class: "tag tag--fixa", text: "fixa" }) : null,
-              d.description ? `${nomeCat}${forma ? ` · ${forma}` : ""}` : (forma || "sem forma de pagamento"),
-            ]),
-          ]),
-          el("span", { class: "exp__amount", text: fmtBRL(d.amount_cents) }),
-          el("span", { class: "exp__chevron", "aria-hidden": "true", text: "›" }),
-        ]);
-      }),
+      ...g.itens.map((d) => linhaDespesa(d, cats, formas, hoje)),
     ])
   ));
+}
+
+/** Selos da linha: parcela (3/10) ou fixa, e a situação (a pagar, atrasada, previsto). */
+function tagsDespesa(d, hoje) {
+  return [
+    d.parcelas ? el("span", { class: "tag tag--fixa", text: `${d.parcela}/${d.parcelas}` })
+      : d.recurring_id ? el("span", { class: "tag tag--fixa", text: "fixa" }) : null,
+    d.prevista ? el("span", { class: "tag tag--previsto", text: "previsto" })
+      : !d.a_pagar ? null
+      : d.spent_on < hoje ? el("span", { class: "tag tag--atrasada", text: "atrasada" })
+      : el("span", { class: "tag tag--apagar", text: "a pagar" }),
+  ];
+}
+
+/** Uma despesa da lista. A prevista (mês futuro) é só leitura: não tem id para editar. */
+function linhaDespesa(d, cats, formas, hoje) {
+  const cat = cats.get(d.category_id);
+  const pai = cat?.parent_id ? cats.get(cat.parent_id) : null;
+  const nomeCat = cat ? (pai ? `${pai.name} › ${cat.name}` : cat.name) : "Sem categoria";
+  const forma = d.payment_method_id ? formas.get(d.payment_method_id)?.name : null;
+  const miolo = [
+    el("span", { class: "exp__dot", style: `background:${(pai || cat)?.color || "#9ca3af"}` }),
+    el("div", { class: "exp__main" }, [
+      el("div", { class: "exp__desc", text: d.description || nomeCat }),
+      el("div", { class: "exp__meta" }, [
+        ...tagsDespesa(d, hoje),
+        d.description ? `${nomeCat}${forma ? ` · ${forma}` : ""}` : (forma || "sem forma de pagamento"),
+      ]),
+    ]),
+    el("span", { class: "exp__amount", text: fmtBRL(d.amount_cents) }),
+  ];
+  if (d.prevista) return el("div", { class: "exp exp--prevista" }, miolo);
+  const situacao = !d.a_pagar ? "" : d.spent_on < hoje ? ", atrasada" : ", a pagar";
+  // a linha INTEIRA é o alvo: no celular ninguém acerta um texto de 4 letras
+  return el("button", {
+    class: "exp", type: "button",
+    "aria-label": `Editar ${d.description || nomeCat}, ${fmtBRL(d.amount_cents)}${situacao}`,
+    onClick: () => abrirFormDespesa(d),
+  }, [...miolo, el("span", { class: "exp__chevron", "aria-hidden": "true", text: "›" })]);
+}
+
+/** Nome para mostrar: a descrição ou, sem ela, a categoria. */
+function nomeDe(d) {
+  return d.description || (state.snapshot?.categories || []).find((c) => c.id === d.category_id)?.name || "Despesa";
 }
 
 // ---- formulário de despesa -------------------------------------------------
@@ -791,7 +985,10 @@ function abrirFormDespesa(despesa) {
 
   const valor = el("input", { class: "input input--amount", inputmode: "decimal", placeholder: "0,00",
     value: despesa ? (despesa.amount_cents / 100).toFixed(2).replace(".", ",") : "" });
-  const data = el("input", { class: "input", type: "date", value: despesa?.spent_on || hojeISO(), max: hojeISO() });
+  const hoje = hojeISO();
+  const lim = despesa ? limitesDataEdicao(despesa, hoje) : { min: null, max: hoje };
+  const data = el("input", { class: "input", type: "date", value: despesa?.spent_on || hoje,
+    min: lim.min, max: lim.max });
   const descricao = el("input", { class: "input", maxlength: "140", placeholder: "Ex.: mercado da esquina", value: despesa?.description || "" });
 
   const chipsSub = el("div", { class: "chips" });
@@ -870,21 +1067,59 @@ function abrirFormDespesa(despesa) {
     );
   }
 
-  // --- repetir todo mês (só ao criar; editar mexe na ocorrência, não na série)
+  // --- repetir ou parcelar (só ao criar; editar mexe na ocorrência, não na série)
   let repetir = false;
-  const repeticoes = seletorRepeticoes(12);
+  let ehTotal = false;   // com N finito: o valor digitado é o total, e o servidor divide
+  const previa = el("div", { class: "previa", "aria-live": "polite" });
+  const chipsValorEh = el("div", { class: "chips", role: "group", "aria-label": "O valor digitado é" });
+  const blocoParcelas = el("div", { style: "display:none" }, [
+    el("div", { class: "small muted", style: "margin-top:10px", text: "O valor é:" }), chipsValorEh, previa,
+  ]);
+  const repeticoes = seletorRepeticoes(12, atualizaPrevia);
+  const checkConfirmar = el("input", { type: "checkbox" });   // desmarcado (D7): cartão não confirma
   const blocoRepetir = el("div", { style: "display:none" });
+
+  function atualizaPrevia() {
+    const r = repeticoes.ler();
+    const n = r.ok ? r.vezes : null;
+    blocoParcelas.style.display = n ? "" : "none";
+    const cents = parseAmountToCents(valor.value);
+    previa.textContent = n && cents ? previaParcelas(cents, n, ehTotal) : "";
+  }
+
+  function desenhaValorEh() {
+    clear(chipsValorEh);
+    for (const [v, rotulo] of [[false, "da parcela"], [true, "total"]]) {
+      chipsValorEh.append(el("button", { class: `chip ${ehTotal === v ? "chip--on" : ""}`, type: "button", text: rotulo,
+        "aria-pressed": ehTotal === v ? "true" : "false",
+        onClick: () => { ehTotal = v; desenhaValorEh(); } }));
+    }
+    atualizaPrevia();
+  }
+  valor.addEventListener("input", atualizaPrevia);
 
   const checkRepetir = el("input", { type: "checkbox" });
   checkRepetir.addEventListener("change", () => {
     repetir = checkRepetir.checked;
     blocoRepetir.style.display = repetir ? "" : "none";
+    // a série pode começar no mês que vem (1º vencimento); a avulsa não passa de hoje
+    if (repetir) data.removeAttribute("max");
+    else {
+      data.max = hojeISO();
+      if (data.value > data.max) data.value = data.max;
+    }
   });
   blocoRepetir.append(
     el("div", { class: "small muted", style: "margin:2px 0 6px" , text:
-      "Lança sozinha todo mês, no mesmo dia da data acima. Só aparece quando o mês chega — nunca adianta o futuro." }),
+      "Um lançamento por mês, no dia da data acima — que pode ser no mês que vem. Os meses seguintes já aparecem como previstos." }),
     repeticoes.node,
+    blocoParcelas,
+    el("label", { class: "choice", style: "margin-top:12px" }, [checkConfirmar, "Preciso confirmar cada pagamento (boleto, carnê)"]),
+    el("div", { class: "small muted", style: "margin-top:6px", text:
+      "Marcado, cada mês entra “a pagar” até você marcar como paga. No cartão não precisa: a parcela já está paga. "
+      + "O que já venceu antes de hoje entra como pago; se não pagou, abra a despesa e use “Voltar para a pagar”." }),
   );
+  desenhaValorEh();
 
   desenhaCategorias();
   desenhaSubs();
@@ -904,16 +1139,21 @@ function abrirFormDespesa(despesa) {
     if (!data.value) { toast("Informe a data.", "error"); return; }
     const rep = repetir ? repeticoes.ler() : { ok: true, vezes: null };
     if (!rep.ok) { toast(rep.erro, "error"); return; }
+    const peloTotal = repetir && rep.vezes && ehTotal;
+    if (peloTotal && cents < rep.vezes) {
+      toast("O total é pequeno demais para tantas parcelas.", "error");
+      return;
+    }
     btnSalvar.disabled = true;
     btnSalvar.textContent = "Salvando...";
     try {
       if (editando) {
         await db.updateDespesa(state.ledgerId, despesa.id, data.value, cents, catSel, formaSel, descricao.value);
       } else if (repetir) {
-        // cria só a SÉRIE: a ocorrência deste mês nasce no próximo carregamento
+        // cria só a SÉRIE: o servidor lança os meses que já chegaram; os seguintes são previstos
         const dia = Number(String(data.value).slice(8, 10)) || 1;
-        await db.addFixa(state.ledgerId, descricao.value, cents, catSel, dia,
-          mesDe(data.value), rep.vezes, formaSel);
+        await db.addFixa(state.ledgerId, descricao.value, peloTotal ? null : cents, catSel, dia,
+          mesDe(data.value), rep.vezes, formaSel, checkConfirmar.checked, peloTotal ? cents : null);
         db.track("criar_fixa", "carteira");
       } else {
         await db.addDespesa(state.ledgerId, data.value, cents, catSel, formaSel, descricao.value);
@@ -923,7 +1163,7 @@ function abrirFormDespesa(despesa) {
       // lançou em outro mês? a tela vai junto, senão a despesa "some"
       await recarregar(mesDe(data.value));
       toast(editando ? "Despesa atualizada."
-        : repetir ? (rep.vezes ? `Fixa criada: vai lançar ${rep.vezes} vezes.` : "Fixa criada: lança todo mês até você cancelar.")
+        : repetir ? (rep.vezes ? `Criada em ${rep.vezes}x: os próximos meses já aparecem como previstos.` : "Fixa criada: lança todo mês até você cancelar.")
         : "Despesa lançada.", "success");
     } catch (err) {
       toast(err.message, "error");
@@ -937,18 +1177,34 @@ function abrirFormDespesa(despesa) {
   const corpo = el("div", {}, [
     campo("Valor", valor),
     el("label", { class: "label", text: "Categoria" }), chipsCat, chipsSub,
-    campo("Data", data),
+    // a data da parcela a pagar é o vencimento: mudá-la de mês a soltaria da série
+    campo("Data", data, despesa?.a_pagar ? "É o vencimento. Pagou? Use “Marcar como paga”." : null),
     el("label", { class: "label", text: "Forma de pagamento (opcional)" }), chipsForma,
     campo("Descrição (opcional)", descricao),
     !editando
       ? el("div", { style: "margin-top:14px" }, [
-          el("label", { class: "choice" }, [checkRepetir, "Repetir todo mês (despesa fixa)"]),
+          el("label", { class: "choice" }, [checkRepetir, "Repetir ou parcelar"]),
           blocoRepetir,
         ])
       : null,
     editando && despesa.recurring_id
       ? el("p", { class: "small muted", style: "margin-top:12px", text:
-          "Esta veio de uma despesa fixa. A alteração vale só para este mês; para mudar a série, use Ajustes → Despesas fixas." })
+          "Esta veio de uma fixa ou parcelado. A alteração vale só para este mês; para mudar a série, use Ajustes → Fixas e parceladas." })
+      : null,
+    // avulsa é sempre paga: só linha que nasceu de série volta para "a pagar"
+    editando && (despesa.a_pagar || despesa.recurring_month)
+      ? el("button", {
+          class: "btn btn--ghost btn--block", type: "button",
+          text: despesa.a_pagar ? "Marcar como paga" : "Voltar para a pagar",
+          onClick: acaoUnica(async () => {
+            try {
+              await db.marcarPago(state.ledgerId, despesa.id, !!despesa.a_pagar);
+              fechar();
+              await recarregar();
+              toast(despesa.a_pagar ? "Marcada como paga." : "Voltou para a pagar.", "success");
+            } catch (err) { toast(err.message, "error"); }
+          }),
+        })
       : null,
     editando
       ? el("button", {
@@ -956,7 +1212,9 @@ function abrirFormDespesa(despesa) {
           type: "button",
           text: "Excluir despesa",
           onClick: async () => {
-            if (!confirmAction("Excluir esta despesa?")) return;
+            if (!confirmAction(despesa.a_pagar
+              ? "Excluir esta parcela a pagar? Ela fica como “não será paga” e não volta. Se você pagou, use Marcar como paga."
+              : "Excluir esta despesa?")) return;
             try {
               await db.delDespesa(state.ledgerId, despesa.id);
               fechar();
@@ -1155,8 +1413,8 @@ function abrirFormForma(f) {
  * campo livre, abrir essa fixa para editar não mostraria nenhum chip aceso e a
  * pessoa não saberia dizer o que está valendo.
  */
-function seletorRepeticoes(inicial) {
-  const PADRAO = [3, 6, 12, 24];
+function seletorRepeticoes(inicial, aoMudar) {
+  const PADRAO = [3, 6, 10, 12, 24];
   const ini = inicial === undefined ? 12 : inicial;
   // uma variável só: um dos atalhos, null (até cancelar) ou "livre".
   // O número do campo livre mora no próprio input, lido só na hora de salvar.
@@ -1169,10 +1427,12 @@ function seletorRepeticoes(inicial) {
     placeholder: "quantos meses", "aria-label": "Quantas vezes repetir",
   });
   if (escolha === "livre") campoNum.value = String(ini);
+  // aoMudar só em gesto da pessoa: na montagem quem chama ainda nem terminou de se montar
+  if (aoMudar) campoNum.addEventListener("input", aoMudar);
 
   function desenha() {
     clear(chips);
-    for (const [v, rotulo] of [[3, "3x"], [6, "6x"], [12, "12x"], [24, "24x"],
+    for (const [v, rotulo] of [...PADRAO.map((n) => [n, `${n}x`]),
                                ["livre", "outro"], [null, "até eu cancelar"]]) {
       const on = v === escolha;
       chips.append(el("button", {
@@ -1181,6 +1441,7 @@ function seletorRepeticoes(inicial) {
         onClick: () => {
           escolha = v;
           desenha();
+          aoMudar?.();
           if (v === "livre") campoNum.focus();
         },
       }));
@@ -1202,13 +1463,10 @@ function seletorRepeticoes(inicial) {
 }
 
 /**
- * Despesas fixas. A ocorrência nasce quando o mês é aberto, nunca antes: por
- * isso a lista fala em "próximo lançamento" e não promete nada do futuro.
+ * Fixas e parceladas. O andamento vem pronto do servidor (linhas pagas e
+ * pendentes, ocorrências que faltam), nunca de N × valor: skip, quitação e
+ * reativação quebrariam a conta.
  */
-/** Quantos meses ainda vêm, contando o corrente. null = sem fim previsto. */
-const mesesAte = (ultimoMes) =>
-  ultimoMes ? Math.max(0, mesesEntre(mesDe(hojeISO()), ultimoMes)) : null;
-
 function cardFixas() {
   const s = state.snapshot;
   const fixas = s.fixas || [];
@@ -1219,28 +1477,30 @@ function cardFixas() {
     ? el("ul", { class: "list" }, fixas.map((f) => {
         const cat = cats.get(f.category_id);
         const forma = f.payment_method_id ? formas.get(f.payment_method_id)?.name : null;
-        const restam = mesesAte(f.ultimo_mes);
-        const situacao = f.cancelado_em
-          ? `cancelada a partir de ${mesExtenso(f.cancelado_em)}`
-          : f.total_meses == null
-            ? "até você cancelar"
-            : restam > 0 ? `faltam ${restam} de ${f.total_meses}` : `concluída (${f.total_meses} lançamento${f.total_meses === 1 ? "" : "s"} previstos)`;
+        const nome = nomeDe(f);
+        const situacao = [
+          f.cancelado_em ? `cancelada a partir de ${mesExtenso(f.cancelado_em)}`
+            : f.total_meses == null ? "até você cancelar" : null,
+          andamentoFixa(f) || `${f.lancadas} lançada${f.lancadas === 1 ? "" : "s"}`,
+        ].filter(Boolean).join(" · ");
         return el("li", { class: "list__item" }, [
           el("span", { class: "catrow__dot", style: `background:${cat?.color || "#9ca3af"}` }),
           el("div", { style: "flex:1;min-width:0" }, [
-            el("div", { class: "list__name", text: f.description || cat?.name || "Despesa fixa" }),
+            el("div", { class: "list__name", text: nome }),
             el("div", { class: "list__sub", text:
-              `${fmtBRL(f.amount_cents)} · dia ${f.dia} · ${cat?.name || "sem categoria"}${forma ? ` · ${forma}` : ""}` }),
+              `${fmtBRL(f.amount_cents)} · dia ${f.dia} · ${cat?.name || "sem categoria"}${forma ? ` · ${forma}` : ""}`
+              + (f.total_cents ? ` · total ${fmtBRL(f.total_cents)}` : "") }),
             el("div", { class: "list__sub" }, [
               f.ativa ? el("span", { class: "tag tag--fixa", text: "ativa" }) : el("span", { class: "badge badge--off", text: "parada" }),
-              ` ${situacao} · ${f.lancadas} lançada${f.lancadas === 1 ? "" : "s"}`,
+              f.confirmar ? el("span", { class: "tag tag--apagar", text: "confirma pagamento" }) : null,
+              ` ${situacao}`,
             ]),
           ]),
           el("div", { class: "list__actions" }, [
-            el("button", { class: "iconbtn", text: "✏️", title: "Editar", onClick: () => abrirFormFixa(f) }),
+            el("button", { class: "iconbtn", text: "✏️", title: "Editar", "aria-label": `Editar ${nome}`, onClick: () => abrirFormFixa(f) }),
             f.cancelado_em
               ? el("button", {
-                  class: "iconbtn", text: "▶️", title: "Reativar",
+                  class: "iconbtn", text: "▶️", title: "Reativar", "aria-label": `Reativar ${nome}`,
                   onClick: async () => {
                     try {
                       await db.reativarFixa(state.ledgerId, f.id);
@@ -1250,9 +1510,18 @@ function cardFixas() {
                   },
                 })
               : el("button", {
-                  class: "iconbtn", text: "⏸️", title: "Cancelar",
+                  class: "iconbtn", text: "⏸️", title: "Cancelar", "aria-label": `Cancelar ${nome}`,
                   onClick: async () => {
-                    if (!confirmAction(`Parar "${f.description || cat?.name}"? O que já foi lançado continua; ela para de aparecer a partir do mês que vem.`)) return;
+                    // a dívida não some com o cancelamento: as pendentes continuam
+                    const pend = f.pendentes || 0;
+                    const aviso = [`Parar "${nome}"? O que já foi lançado continua; ela para de aparecer a partir do mês que vem.`];
+                    if (pend) {
+                      aviso.push(`${pend === 1 ? "A parcela a pagar continua pendente" : `As ${pend} parcelas a pagar continuam pendentes`}.`,
+                        "Se está quitando, lance a quitação como despesa e exclua as parcelas a pagar que ela cobre.");
+                    } else if (f.total_meses != null) {
+                      aviso.push("Se está quitando, lance a quitação como despesa.");
+                    }
+                    if (!confirmAction(aviso.join(" "))) return;
                     try {
                       await db.cancelarFixa(state.ledgerId, f.id);
                       await recarregar();
@@ -1260,34 +1529,46 @@ function cardFixas() {
                     } catch (e) { toast(e.message, "error"); }
                   },
                 }),
-            el("button", {
-              class: "iconbtn", text: "🗑️", title: "Excluir",
-              onClick: async () => {
-                const aviso = f.lancadas > 0
-                  ? `Excluir a regra "${f.description || cat?.name}"? ${f.lancadas === 1
-                      ? "O lançamento já feito continua"
-                      : `Os ${f.lancadas} lançamentos já feitos continuam`} no histórico; ela só para de lançar.`
-                  : "Excluir esta despesa fixa?";
-                if (!confirmAction(aviso)) return;
-                try {
-                  await db.delFixa(state.ledgerId, f.id, f.lancadas > 0);
-                  await recarregar();
-                  toast("Fixa excluída.", "success");
-                } catch (e) { toast(e.message, "error"); }
-              },
-            }),
+            el("button", { class: "iconbtn", text: "🗑️", title: "Excluir", "aria-label": `Excluir ${nome}`, onClick: () => abrirExcluirFixa(f) }),
           ]),
         ]);
       }))
     : el("p", { class: "muted small", style: "margin:4px 0 0", text:
-        "Nenhuma despesa fixa. Ao lançar uma despesa, marque “Repetir todo mês”." });
+        "Nenhuma fixa ou parcelado. Ao lançar uma despesa, marque “Repetir ou parcelar”." });
 
   return el("div", { class: "card" }, [
-    el("h3", { class: "sheet__title", text: "Despesas fixas" }),
+    el("h3", { class: "sheet__title", text: "Fixas e parceladas" }),
     el("p", { class: "small muted", style: "margin:6px 0 12px", text:
-      "Aluguel, escola, assinatura. Entram sozinhas quando o mês chega — nunca antes, para o relatório não mostrar gasto que ainda não aconteceu." }),
+      "Aluguel, assinatura, compra parcelada. Cada mês entra quando chega, no dia da série; os próximos já aparecem como previstos ao avançar o mês." }),
     corpo,
   ]);
+}
+
+/**
+ * Excluir a regra. Apagar junto os lançamentos é para quem cadastrou errado:
+ * sem isso, cadastrar de novo duplicaria os meses já lançados.
+ */
+function abrirExcluirFixa(f) {
+  const n = f.lancadas || 0;
+  const apagar = el("input", { type: "checkbox" });
+  const btn = el("button", { class: "btn btn--danger btn--lg", type: "button", text: "Excluir" });
+  btn.onclick = acaoUnica(async () => {
+    try {
+      await db.delFixa(state.ledgerId, f.id, n > 0 && !apagar.checked, apagar.checked);
+      close();
+      await recarregar();
+      toast(apagar.checked ? "Excluída junto com os lançamentos." : "Fixa excluída.", "success");
+    } catch (e) { toast(e.message, "error"); }
+  });
+  const { close } = openModal(`Excluir "${nomeDe(f)}"?`, el("div", {}, n
+    ? [
+        el("p", { style: "margin:4px 0 0", text:
+          `A regra some e ${n === 1 ? "o lançamento já feito continua" : `os ${n} lançamentos já feitos continuam`} no histórico.` }),
+        el("label", { class: "choice", style: "margin-top:12px" }, [apagar, n === 1 ? "Apagar também o lançamento" : `Apagar também os ${n} lançamentos`]),
+        el("p", { class: "small muted", style: "margin-top:8px", text:
+          "Marque se cadastrou errado: sem isso, cadastrar de novo duplicaria os meses já lançados." }),
+      ]
+    : [el("p", { style: "margin:4px 0 0", text: "Ela ainda não lançou nada; a regra some de vez." })]), btn);
 }
 
 function abrirFormFixa(f) {
@@ -1309,6 +1590,7 @@ function abrirFormFixa(f) {
   ]);
 
   const repeticoes = seletorRepeticoes(f.total_meses);
+  const confirmar = el("input", { type: "checkbox", checked: !!f.confirmar });
 
   const salvar = el("button", { class: "btn btn--primary btn--lg", type: "button", text: "Salvar" });
   salvar.onclick = acaoUnica(async () => {
@@ -1320,20 +1602,23 @@ function abrirFormFixa(f) {
     const rep = repeticoes.ler();
     if (!rep.ok) { toast(rep.erro, "error"); return; }
     try {
-      await db.updateFixa(state.ledgerId, f.id, descricao.value, cents, selCat.value, d, rep.vezes, selForma.value || null);
+      await db.updateFixa(state.ledgerId, f.id, descricao.value, cents, selCat.value, d, rep.vezes,
+        selForma.value || null, confirmar.checked);
       close();
       await recarregar();
       toast("Fixa atualizada. Vale para os próximos lançamentos.", "success");
     } catch (e) { toast(e.message, "error"); }
   });
 
-  const { close } = openModal("Editar despesa fixa", el("div", {}, [
+  const { close } = openModal("Editar fixa ou parcelado", el("div", {}, [
     campo("Descrição", descricao),
-    campo("Valor", valor),
+    campo("Valor de cada mês", valor, f.total_cents
+      ? `Parcela de um total de ${fmtBRL(f.total_cents)}. Mudar o valor ou o número de meses desfaz a divisão pelo total.` : null),
     campo("Dia do mês", dia, "Mês sem esse dia usa o último dia."),
     campo("Categoria", selCat),
     campo("Forma de pagamento", selForma),
     el("label", { class: "label", text: "Por quantos meses" }), repeticoes.node,
+    el("label", { class: "choice", style: "margin-top:12px" }, [confirmar, "Preciso confirmar cada pagamento (boleto, carnê)"]),
     el("p", { class: "small muted", style: "margin-top:8px", text:
       `Já lançou ${f.lancadas} vez${f.lancadas === 1 ? "" : "es"}. Alterar aqui não mexe no que já foi lançado.` }),
   ]), salvar);
@@ -1453,6 +1738,20 @@ function montaPromptIA(base, anon, token) {
     "  controlai_api_editar     {p_id, p_valor?, p_categoria?, p_data?, p_forma?, p_descricao?}",
     "  controlai_api_apagar     {p_id}",
     "  controlai_api_criar_categoria {p_nome, p_pai?}",
+    "  controlai_api_criar_fixa {p_valor | p_valor_total, p_categoria, p_meses?, p_dia?, p_forma?,",
+    "                            p_descricao?, p_mes_inicio?, p_confirmar?}",
+    "                           -> todo mês (sem p_meses) ou parcelado (p_meses = nº de parcelas)",
+    "  controlai_api_marcar_pago {p_id, p_pago?}   -> p_pago false volta para a pagar",
+    "  controlai_api_contas_a_pagar {}              -> atrasadas, vencem este mês, próximas",
+    "  controlai_api_listar_fixas {}",
+    "  controlai_api_editar_fixa {p_id, p_valor?, p_categoria?, p_dia?, p_meses?, p_ate_cancelar?,",
+    "                             p_forma?, p_descricao?, p_confirmar?}",
+    "  controlai_api_cancelar_fixa {p_id}",
+    "",
+    "Parcelado (\"10x\"): criar_fixa com p_meses; se disseram o total, p_valor_total",
+    "em vez de p_valor. Boleto ou carnê: p_confirmar true. \"Paguei X\": contas_a_pagar",
+    "para achar o id e depois marcar_pago.",
+    "Mudar uma fixa é editar_fixa (cancelar e criar outra duplica o mês); quitar = cancelar_fixa + apagar as pendentes cobertas + lancar.",
     "",
     "Confirme comigo antes de apagar qualquer coisa.",
   ].join("\n");
@@ -1582,6 +1881,8 @@ function abaAjustes() {
         },
       }),
     ]),
+
+    el("p", { class: "versao", text: `Controlaí ${VERSAO}` }),
   ]);
 }
 
@@ -1632,7 +1933,10 @@ function openModal(title, contentNode, rodape) {
     document.removeEventListener("keydown", onKey, true);
     overlay.classList.remove("overlay--show");
     setTimeout(() => overlay.remove(), 200);
-    try { antes && antes.focus && antes.focus(); } catch { /* ignora */ }
+    // a tela de trás pode ter sido redesenhada com a folha aberta (recarregar):
+    // quem abriu já não existe, e o foco cairia no body
+    const alvo = antes?.isConnected ? antes : document.querySelector(".apagar") || document.querySelector(".fab");
+    try { alvo?.focus?.(); } catch { /* ignora */ }
   };
   const focaveis = () => sheet.querySelectorAll(
     'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])');

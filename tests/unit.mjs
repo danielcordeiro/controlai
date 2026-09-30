@@ -3,7 +3,8 @@
 
 import {
   parseAmountToCents, fmtBRL, hojeISO, mesDe, mesAdd, mesExtenso, mesCurto,
-  dataCurta, diasNoMes, variacaoPct, MAX_CENTAVOS, mesesEntre, acaoUnica,
+  dataCurta, diasNoMes, variacaoPct, MAX_CENTAVOS, acaoUnica,
+  divideParcelas, previaParcelas, limiteNavegacao, limitesDataEdicao,
 } from "../js/ui.js";
 
 let falhas = 0;
@@ -78,20 +79,6 @@ grupo("mesAdd / mesDe / mesExtenso", () => {
   eq(mesAdd("2026-01", -1), "2025-12", "vira o ano para trás");
   eq(mesAdd("2026-09", -12), "2025-09", "um ano atrás");
   eq(mesAdd("2026-09", 0), "2026-09", "delta zero");
-  // mesesEntre: conta os dois extremos — é o "faltam N" das despesas fixas
-  eq(mesesEntre("2026-09", "2026-09"), 1, "mesmo mês conta 1");
-  eq(mesesEntre("2026-09", "2026-12"), 4, "setembro a dezembro");
-  eq(mesesEntre("2026-11", "2027-02"), 4, "atravessa o ano");
-  eq(mesesEntre("2026-09", "2027-09"), 13, "um ano inteiro mais o corrente");
-  eq(mesesEntre("2026-10", "2026-09"), 0, "fim antes do início não é negativo");
-  eq(mesesEntre("lixo", "2026-09"), 0, "entrada inválida vira 0");
-  // bate com a contagem por laço, que é a definição
-  for (let k = 0; k < 30; k++) {
-    let m = "2026-01", n = 0;
-    const fim = mesAdd("2026-01", k);
-    while (m <= fim) { n++; m = mesAdd(m, 1); }
-    eq(mesesEntre("2026-01", fim), n, `mesesEntre bate com o laço em +${k}`);
-  }
   eq(mesExtenso("2026-09"), "setembro de 2026", "mês por extenso");
   eq(mesExtenso("2026-03"), "março de 2026", "acento preservado");
   eq(mesCurto("2026-09"), "set/26", "mês curto");
@@ -101,6 +88,52 @@ grupo("mesAdd / mesDe / mesExtenso", () => {
     eq(mesAdd(mesAdd(m, 1), -1), m, `ida e volta em ${m}`);
     m = mesAdd(m, 1);
   }
+});
+
+grupo("divideParcelas / previaParcelas (a mesma divisão do servidor)", () => {
+  const d = divideParcelas(100000, 3);
+  eq(d.primeira, 33334, "a 1ª leva o centavo que sobra");
+  eq(d.parcela, 33333, "as demais com a divisão inteira");
+  eq(divideParcelas(300000, 10).primeira, 30000, "divisão exata não tem resto");
+  // soma = total e o resto cabe no check do banco (0 .. N-1)
+  for (const [t, n] of [[100000, 3], [99999, 7], [1, 1], [12345, 12], [10, 10], [2147483647, 600]]) {
+    const { parcela, primeira } = divideParcelas(t, n);
+    eq(primeira + parcela * (n - 1), t, `soma das parcelas = total em ${t}/${n}`);
+    ok(t - parcela * n >= 0 && t - parcela * n <= n - 1, `resto dentro do check em ${t}/${n}`);
+  }
+  eq(previaParcelas(30000, 10, false), `10x de ${fmtBRL(30000)} · total ${fmtBRL(300000)}`, "valor da parcela");
+  eq(previaParcelas(300000, 10, true), `10x de ${fmtBRL(30000)} · total ${fmtBRL(300000)}`, "total que divide exato");
+  eq(previaParcelas(100000, 3, true), `1ª ${fmtBRL(33334)} + 2x ${fmtBRL(33333)} · total ${fmtBRL(100000)}`,
+    "total com centavo de sobra");
+});
+
+grupo("limiteNavegacao (até onde o › avança)", () => {
+  const A = "2026-09";
+  eq(limiteNavegacao([], A), A, "sem série o › para no mês atual");
+  eq(limiteNavegacao(undefined, A), A, "snapshot sem fixas");
+  eq(limiteNavegacao([{ mes_inicio: "2026-08", ultimo_mes: "2027-05" }], A), "2027-05", "parcelado vai até a última parcela");
+  eq(limiteNavegacao([{ mes_inicio: "2025-01", ultimo_mes: null }], A), "2026-10", "sem fim: só o mês que vem");
+  eq(limiteNavegacao([{ mes_inicio: "2027-02", ultimo_mes: null }], A), "2027-02", "sem fim que começa depois: até o início");
+  eq(limiteNavegacao([{ mes_inicio: "2026-01", ultimo_mes: "2026-06" }], A), A, "série acabada não abre o futuro");
+  eq(limiteNavegacao([{ mes_inicio: "2025-01", cancelado_em: "2026-10", ultimo_mes: "2026-09" }], A), A,
+    "sem fim cancelada não abre o futuro");
+  eq(limiteNavegacao([{ mes_inicio: "2026-01", ultimo_mes: "2026-09" }, { mes_inicio: "2026-09", ultimo_mes: "2026-12" }], A),
+    "2026-12", "vale a série que vai mais longe");
+  eq(limiteNavegacao([{ mes_inicio: "2026-11", ultimo_mes: null }], "2026-12"), "2027-01", "vira o ano");
+});
+
+grupo("limitesDataEdicao (a mesma régua do servidor)", () => {
+  const ap = (spent_on) => limitesDataEdicao({ spent_on, a_pagar: true }, "2026-09-30");
+  eq(ap("2026-08-10").min, "2026-08-01", "a pagar: do 1º dia do mês do vencimento");
+  eq(ap("2026-08-10").max, "2026-08-31", "a pagar: até o último dia, sem sair do mês");
+  eq(ap("2026-02-10").max, "2026-02-28", "fevereiro comum");
+  eq(ap("2024-02-10").max, "2024-02-29", "fevereiro bissexto");
+  const paga = (spent_on, hoje) => limitesDataEdicao({ spent_on, a_pagar: false }, hoje);
+  eq(paga("2026-09-03", "2026-09-10").min, null, "paga: sem mínimo");
+  eq(paga("2026-09-03", "2026-09-10").max, "2026-09-11", "paga: até amanhã");
+  eq(paga("2026-09-03", "2026-09-30").max, "2026-10-01", "amanhã vira o mês");
+  eq(paga("2026-12-03", "2026-12-31").max, "2027-01-01", "amanhã vira o ano");
+  eq(paga("2026-09-20", "2026-09-05").max, "2026-09-20", "série lançada à frente de hoje: até a própria data");
 });
 
 grupo("diasNoMes", () => {
@@ -138,8 +171,10 @@ grupo("variacaoPct", () => {
 });
 
 // ---------------------------------------------------------------- agregação do mês
-const { porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV } =
-  await import("../js/report.js");
+const {
+  porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
+  ritmoDoMes, resumoAPagar, andamentoFixa,
+} = await import("../js/report.js");
 
 const CATS = [
   { id: "c1", name: "Alimentação", color: "#ef4444", parent_id: null },
@@ -247,6 +282,54 @@ grupo("maioresDespesas", () => {
   eq(top[0].id, "e4", "maior primeiro");
   ok(top[0].amount_cents >= top[1].amount_cents, "ordenado decrescente");
   eq(maioresDespesas([], 3).length, 0, "vazio");
+});
+
+grupo("ritmoDoMes (média por dia e projeção sem inflar com série)", () => {
+  const aluguel = { amount_cents: 150000, recurring_id: "r1", recurring_month: "2026-09", spent_on: "2026-09-07" };
+  // o bug de antes: R$ 1.500 no dia 7 virava R$ 6.428 de projeção e R$ 214 por dia
+  const so = ritmoDoMes([aluguel], "2026-09", "2026-09-07");
+  eq(so.projecao, 150000, "a série entra uma vez na projeção");
+  eq(so.mediaDia, 5000, "a série se espalha pelo mês na média por dia");
+  const mercado = { amount_cents: 7000, recurring_id: null, recurring_month: null, spent_on: "2026-09-03" };
+  eq(ritmoDoMes([aluguel, mercado], "2026-09", "2026-09-07").projecao, 150000 + 30000,
+    "só a avulsa é extrapolada (R$ 70 em 7 dias vira R$ 300 em 30)");
+  eq(ritmoDoMes([aluguel, mercado], "2026-09", "2026-09-06").projecao, null, "antes do 7º dia não projeta");
+  const fechado = ritmoDoMes([aluguel, mercado], "2026-08", "2026-09-07");
+  eq(fechado.projecao, null, "mês fechado não projeta");
+  eq(fechado.mediaDia, Math.round(157000 / 31), "mês fechado: total dividido pelos dias");
+  // excluir a regra solta a linha mas guarda o mês: continua sendo uma vez por mês
+  const solta = { amount_cents: 30000, recurring_id: null, recurring_month: "2026-09", spent_on: "2026-09-02" };
+  eq(ritmoDoMes([solta], "2026-09", "2026-09-10").projecao, 30000, "linha solta de série não é extrapolada");
+});
+
+grupo("resumoAPagar (card A pagar)", () => {
+  const pend = [
+    { id: "a", spent_on: "2026-08-10", amount_cents: 30000 },
+    { id: "b", spent_on: "2026-09-10", amount_cents: 30000 },
+    { id: "c", spent_on: "2026-09-30", amount_cents: 25000 },
+  ];
+  const prox = [
+    { spent_on: "2026-10-15", amount_cents: 5000, description: "Escola" },
+    { spent_on: "2026-10-10", amount_cents: 30000, description: "Geladeira" },
+  ];
+  const r = resumoAPagar(pend, prox, "2026-09-30");
+  eq(r.atrasadas.length, 2, "vencimento antes de hoje é atrasada");
+  eq(r.atrasadasCents, 60000, "soma das atrasadas");
+  eq(r.esteMes.length, 1, "a que vence hoje ainda não está atrasada");
+  eq(r.esteMesCents, 25000, "soma das que vencem este mês");
+  eq(r.proxima.description, "Geladeira", "próxima é a de vencimento mais cedo");
+  eq(resumoAPagar([], null, "2026-09-30").proxima, null, "sem nada a pagar");
+});
+
+grupo("andamentoFixa", () => {
+  eq(andamentoFixa({ pagas: 3, pendentes: 1, pendentes_cents: 30000, futuras: 6, futuras_cents: 180000 }),
+    `3 de 10 pagas · falta ${fmtBRL(210000)}`, "falta = pendentes + futuras; de M = pagas + pendentes + futuras");
+  eq(andamentoFixa({ pagas: 10, pendentes: 0, pendentes_cents: 0, futuras: 0, futuras_cents: 0 }),
+    "10 de 10 pagas", "quitada não fala em falta");
+  eq(andamentoFixa({ pagas: 5, pendentes: 1, pendentes_cents: 150000, futuras: null, futuras_cents: null }),
+    `1 pendente · ${fmtBRL(150000)}`, "sem fim mostra só as pendentes");
+  eq(andamentoFixa({ pagas: 5, pendentes: 0, pendentes_cents: 0, futuras: null, futuras_cents: null }),
+    "", "sem fim em dia não diz nada");
 });
 
 // ---------------------------------------------------------------- planilha Excel

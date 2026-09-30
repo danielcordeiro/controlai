@@ -61,16 +61,20 @@ controlai.expense         a despesa
   payment_method_id       ← OPCIONAL, ON DELETE SET NULL
   description, created_at, updated_at
   index (ledger_id, spent_on desc)   ← a consulta quente: um mês de uma carteira
-  recurring_id, recurring_month      ← preenchidos só quando veio de uma fixa
+  recurring_id, recurring_month      ← a série e o mês que geraram a linha (excluir a regra zera só o recurring_id)
   unique (recurring_id, recurring_month) where recurring_id is not null
+  a_pagar boolean         ← true = pagamento ainda não confirmado; avulsa é sempre false
 
-controlai.recurring       a despesa fixa — uma REGRA, não lançamentos futuros
+controlai.recurring       a despesa fixa ou o parcelado — uma REGRA, não lançamentos futuros
   id, ledger_id
   description, amount_cents, category_id, payment_method_id
   dia integer             ← 1..31; mês sem esse dia usa o último
   mes_inicio text         ← 'AAAA-MM', primeiro mês em que aparece
-  total_meses integer     ← null = indeterminado (até cancelar)
+  total_meses integer     ← null = indeterminado (até cancelar); N = parcelado em N vezes
   cancelado_em text       ← 'AAAA-MM': não gera deste mês em diante
+  confirmar boolean       ← a ocorrência nasce a pagar (boleto, carnê)
+  total_cents integer     ← o total informado ("R$ 1.000 em 3x"); null = informou a parcela
+  check recurring_total_ok: total_cents - amount_cents × total_meses entre 0 e total_meses - 1
   created_at
 
 controlai.recurring_skip  "apaguei a ocorrência deste mês"
@@ -88,53 +92,116 @@ lançamento.
 (`controlai_del_categoria` recusa e explica). Arquivada, some do formulário e
 continua explicando os meses passados.
 
-### Despesa fixa: geração sob demanda, nunca no futuro
+### Fixa e parcelado: regra + projeção
 
-A alternativa óbvia — criar as 12 despesas de uma vez — foi descartada por três
-motivos concretos:
+Parcelado é **fixa finita**: `total_meses = 10` já é "10 vezes", e o rótulo
+`3/10` é calculado. A alternativa óbvia — gravar as 12 despesas (ou as 10
+parcelas) de uma vez — foi descartada por motivos concretos:
 
 1. **O mês que vem apareceria pré-gasto.** O app existe para responder "quanto
    gastei", e um outubro com R$ 1.500 de aluguel antes de outubro chegar é uma
-   resposta errada.
+   resposta errada. O futuro aparece, mas como **"Já comprometido"**, separado
+   do gasto.
 2. **Corrigir o valor viraria um mutirão.** O aluguel reajusta; com lançamentos
-   materializados seria preciso varrer e reescrever cada um.
+   materializados seria preciso varrer e reescrever cada um — e cada edição da
+   série desfaria os ajustes feitos à mão.
 3. **"Até eu cancelar" não tem fim** — não existe número de linhas a criar.
+4. **Pagamento se perderia.** Com as parcelas gravadas, excluir a regra levaria
+   junto o que já foi confirmado como pago.
 
-Então a ocorrência nasce quando o mês é aberto: `controlai_mes` chama
-`controlai._gerar_fixas(ledger, mes)`, que é a única coisa que materializa
-lançamento de fixa. Ela:
+Então **o futuro é calculado, nunca gravado**. `controlai._ocorrencias(ledger, de,
+ate)` é a **única** definição de quais ocorrências as regras de uma carteira têm
+num intervalo de meses — vencimento, valor, parcela `3/10` e se nasce a pagar,
+com os skips já descontados. Dela saem:
 
-- **retorna imediatamente se o mês pedido é futuro** — a regra que impede o mês
-  que vem de chegar pré-gasto;
-- é **idempotente**: o índice único `(recurring_id, recurring_month)` e a checagem
-  prévia garantem uma ocorrência por fixa por mês, quantas vezes rodar;
+- **a materialização**: `controlai._gerar_fixas(ledger, mes)`, o único INSERT de
+  ocorrência, é um insert-select de `_ocorrencias`;
+- **a projeção**: as `previstas` de `controlai_mes` (mesmo formato de uma
+  despesa, sem id, `prevista: true`), as `proximas` a confirmar, o andamento de
+  cada série e as leituras da IA (`api_resumo`, `api_listar`,
+  `api_contas_a_pagar`).
+
+**Invariante: nenhuma linha de série existe depois do mês corrente.** A avulsa
+continua aceitando hoje+1, então o mês que vem pode ter linha real no último dia
+do mês — a tela de mês futuro mostra as duas coisas ("Já comprometido" e "Já
+lançado").
+
+`_gerar_fixas`, disparada pelo catch-up (que roda em `controlai_mes`, nas leituras
+da IA e ao criar e editar a fixa) e por reativar a fixa:
+
+- **retorna imediatamente se o mês pedido é futuro** — a regra que sustenta o
+  invariante;
+- é **idempotente**: o índice único `(recurring_id, recurring_month)` garante
+  uma ocorrência por série por mês, quantas vezes rodar;
 - respeita o **skip**: apagar o lançamento de julho grava `(fixa, '2026-07')` em
   `recurring_skip`, e julho não volta;
-- **grampeia o dia**: 31 num mês de 30 vira o dia 30, e a ocorrência do mês
-  corrente nunca nasce com data futura (cai em hoje).
+- **põe a ocorrência no dia da série** (D6): 15/10, 15/11..., com 31 num mês de
+  30 grampeado no dia 30. Antes a data era `least(dia, hoje)`; o total do mês não
+  muda, porque a ocorrência já contava desde o dia 1, só que com a data de hoje.
+
+**Pago e a pagar.** O status é um fato da linha, `expense.a_pagar`; a série só
+decide com que status a ocorrência nasce: `a_pagar = confirmar and vencimento >=
+data de criação da série`. A parcela a pagar **conta** no gasto do mês do
+vencimento (D3), com selo. `controlai_marcar_pago` aceita `pago = true` em
+qualquer linha e `pago = false` só em linha que nasceu de série
+(`recurring_month` preenchido): avulsa é sempre paga (D4). A data do pagamento
+não é guardada.
+
+**Criação retroativa.** Ocorrência que venceu **antes** de a série ser cadastrada
+é histórico e nasce paga. Isso resolve o parcelamento cadastrado em andamento —
+inclusive a parcela do mês corrente que já venceu — sem atraso falso, e continua
+certo em qualquer catch-up posterior, inclusive além do teto de 240 meses. Se não
+pagou, "Voltar para a pagar". Já o catch-up depois de meses sem abrir o app faz
+as ocorrências a confirmar desses meses nascerem a pagar e aparecerem atrasadas:
+é o certo, o app não sabe se foram pagas.
+
+**Valor total.** Quem informa "R$ 1.000 em 3x" grava `total_cents`; o
+**servidor** divide (`amount_cents = total_cents / total_meses`, inteira) e a
+parcela 1 leva o resto: 333,34 + 333,33 + 333,33. O check `recurring_total_ok`
+prende a coerência, e mudar valor ou N na edição zera `total_cents`.
+
+**Data das linhas.** `controlai._data_ok(nova, antiga, a_pagar)` substituiu as
+quatro cópias de "não pode ser no futuro": data inalterada passa (editar o valor
+da parcela do dia 20 no dia 5 não falha); linha a pagar não muda de mês, porque
+a data dela é o vencimento — pôr ali a data em que pagou soltaria a parcela da
+série, com skip no mês original e parcela a mais no novo; o resto continua em
+hoje+1.
+
+**Andamento.** Sai das linhas e de `_ocorrencias`, nunca de N × valor (skip,
+quitação e reativação quebrariam a conta): `pagas` e `pendentes` são as linhas da
+série por `a_pagar`, `futuras` é `_ocorrencias` do mês que vem até o último mês
+da série, recortada nela pelo `p_recurring` — nulo em série sem fim, que mostra
+só as pendentes.
 
 Cancelar grava `cancelado_em` = mês que vem, então para de gerar dali em diante
-sem apagar nada. **Reativar** não pode simplesmente limpar essa marca: os meses
-em que a fixa esteve parada viram `recurring_skip` antes, senão a próxima
-abertura do app faria meses já fechados brotarem com lançamentos que nunca
-foram pagos. **Excluir** apaga só a regra e solta as ocorrências
-(`recurring_id` vira nulo): exigir "zero lançamentos" deixaria o botão inútil
-para sempre, porque a ocorrência do mês corrente nasce junto com a fixa.
+sem apagar nada; as parcelas a pagar continuam pendentes, porque a dívida não
+some. **Reativar** não pode simplesmente limpar essa marca: os meses em que a
+série esteve parada viram `recurring_skip` antes, senão a próxima abertura do
+app faria meses já fechados brotarem com lançamentos que nunca foram pagos.
+**Excluir** apaga só a regra e solta as ocorrências: exigir "zero lançamentos"
+deixaria o botão inútil para sempre, porque a ocorrência do mês corrente nasce
+junto com a série. `recurring_id` vira nulo mas `recurring_month` fica, então
+uma pendente solta ainda pode voltar a ser desmarcada. Para quem cadastrou
+errado, excluir com **apagar também os lançamentos** leva tudo — sem isso,
+recadastrar duplicaria os meses já lançados. Excluir **uma** parcela a pagar
+grava skip: "esta não será paga".
 
 Duas armadilhas resolvidas na revisão:
 
 - **Mudar a data de uma ocorrência para outro mês.** O lançamento continuaria
   marcado como "a ocorrência de setembro" estando em agosto: setembro nunca mais
   seria gerado e agosto ficaria com dois. `controlai._solta_da_fixa` desfaz o
-  vínculo e marca o mês de origem como pulado.
+  vínculo e marca o mês de origem como pulado. (Linha a pagar nem chega aqui:
+  `_data_ok` recusa mudar o mês dela.)
 - **Quem só fala com o app pela IA.** A geração era disparada só por
   `controlai_mes`, então o conector respondia o total do mês sem nenhuma fixa,
   e o mesmo mês mudava de valor quando a pessoa abria a tela. Agora
-  `controlai._catchup_fixas` roda também em `contexto`, `resumo` e `listar`, e
+  `controlai._catchup_fixas` roda também em `contexto`, `resumo`, `listar`,
+  `listar_fixas` e `contas_a_pagar`, e
   põe em dia todos os meses pendentes de uma vez — `ledger.fixas_ate` guarda até
   onde já foi, para não varrer o histórico a cada abertura.
 
-Na tela, os atalhos `3x/6x/12x/24x/até eu cancelar` cobrem o caso comum e
+Na tela, os atalhos `3x/6x/10x/12x/24x/até eu cancelar` cobrem o caso comum e
 `outro` abre um campo livre. O campo livre não é luxo: a IA cria fixa com
 qualquer número de meses, e sem ele abrir uma fixa de 7 meses para editar não
 acenderia chip nenhum — a pessoa não saberia dizer o que está valendo.
@@ -219,13 +286,15 @@ estraga justamente o número que o app existe para mostrar.
 |---|---|
 | `controlai_api_contexto` | categorias, subcategorias, formas, hoje e mês atual |
 | `controlai_api_lancar` | valor em reais, categoria por nome, data e forma opcionais |
-| `controlai_api_resumo` | total do mês por categoria e por forma, com o mês anterior |
-| `controlai_api_listar` | lançamentos do mês com id, para editar ou apagar |
+| `controlai_api_resumo` | total do mês por categoria e por forma, com o mês anterior; `pago` e `a_pagar`; `comprometido` e `comprometido_a_confirmar`; mês futuro sai sem comparação |
+| `controlai_api_listar` | lançamentos do mês com id, `a_pagar` e `parcela` (`3/10`); em mês futuro, também as previstas (`prevista: true`, sem id) |
 | `controlai_api_editar` / `apagar` | alteram só o que foi informado |
-| `controlai_api_criar_fixa` | despesa fixa: `meses` para um número de repetições, omitido para "até cancelar" |
-| `controlai_api_listar_fixas` | as fixas com valor, dia, quantas foram lançadas e se estão ativas |
-| `controlai_api_editar_fixa` | muda a série daqui para frente (`ate_cancelar` tira o prazo) |
-| `controlai_api_cancelar_fixa` | para de lançar do mês que vem; o histórico continua |
+| `controlai_api_criar_fixa` | fixa ou parcelado: `valor` ou `valor_total` (exatamente um), `meses` para um número de repetições ou omitido para "até cancelar", `confirmar` para boleto/carnê |
+| `controlai_api_listar_fixas` | as séries com valor, dia, se estão ativas, `confirmar`, `valor_total` e o andamento (`pagas`, `pendentes`, `restantes`, `falta`) |
+| `controlai_api_editar_fixa` | muda a série daqui para frente (`ate_cancelar` tira o prazo; `confirmar` omitido mantém) |
+| `controlai_api_cancelar_fixa` | para de lançar do mês que vem; o histórico e as pendentes continuam |
+| `controlai_api_marcar_pago` | marca a linha como paga ou, se nasceu de série, volta para a pagar |
+| `controlai_api_contas_a_pagar` | atrasadas, vencem este mês, próximas a confirmar e o andamento das séries a confirmar (o parcelado no cartão fica em `listar_fixas`) |
 | `controlai_api_criar_categoria` | quando a pessoa realmente quer uma nova |
 | `controlai_get_api_token` / `rotate_api_token` | chamadas pelo app, recebem o uuid da carteira |
 
@@ -249,7 +318,13 @@ deve ser tratada como senha.
 As instruções do servidor dizem explicitamente que gasto que se repete todo mês é
 `criar_fixa`, não uma despesa lançada doze vezes — sem isso o modelo tende a
 resolver "todo mês pago 1500 de aluguel" com um laço de `lancar_despesa`, que é
-justamente o que a seção 3 descarta.
+justamente o que a seção 3 descarta. Pelo mesmo motivo o parcelado tem
+ferramenta própria, `lancar_parcelado`, que chama a mesma
+`controlai_api_criar_fixa` com `parcelas` obrigatório: sem ela o modelo resolve
+"10x" com um lançamento do total ou com dez. As instruções também dizem que
+boleto e carnê levam `confirmar=true`, que "paguei X" é `contas_a_pagar` +
+`marcar_pago` e que quitar é `cancelar_fixa` + apagar as pendentes cobertas +
+`lancar_despesa`.
 
 Erro de ferramenta volta como `isError` com o texto da exceção, não como erro de
 protocolo — assim o modelo lê *"Categoria X não existe. Disponíveis: ..."* e se
@@ -275,13 +350,14 @@ o arquivo como *Microsoft Excel 2007+* e o `unzip -t` passa sem erro.
 | Função | Para quê |
 |---|---|
 | `controlai_criar(name, email)` | cria a carteira e **semeia** 10 categorias e 5 formas de pagamento, para a pessoa já sair lançando |
-| `controlai_mes(ledger, mes)` | **uma chamada** devolve tudo da tela: carteira, categorias, formas, despesas do mês, fixas, total do mês, total do mês anterior e os meses com lançamento. É também o gatilho que materializa as ocorrências das fixas daquele mês |
+| `controlai_mes(ledger, mes)` | **uma chamada** devolve tudo da tela: carteira, categorias, formas, despesas do mês (com `a_pagar` e `parcela`), fixas com andamento, total do mês, total do mês anterior, os meses com lançamento, as `previstas` de mês futuro, as `pendentes` da carteira e as `proximas` a confirmar. É também um gatilho do catch-up, que materializa as ocorrências das fixas até o mês corrente |
 | `controlai_meus_ids()` | recuperação (lê o e-mail do JWT) |
-| `controlai_add_despesa` / `update` / `del` | CRUD da despesa, com as validações de posse e de data futura |
+| `controlai_add_despesa` / `update` / `del` | CRUD da despesa, com as validações de posse e de data (`_data_ok`) |
+| `controlai_marcar_pago(ledger, expense, pago)` | pago ou de volta para a pagar; avulsa não volta, é sempre paga |
 | `controlai_add_categoria` / `update` / `del` | plano de contas (impede subcategoria de subcategoria) |
 | `controlai_add_forma` / `update` / `del` | formas de pagamento |
-| `controlai_add_fixa` / `update_fixa` | cria e edita a despesa fixa (a edição vale daqui para frente) |
-| `controlai_cancelar_fixa` / `reativar_fixa` / `del_fixa` | cancelar para de gerar do mês que vem; reativar não ressuscita o período parado; excluir tira a regra e mantém o histórico |
+| `controlai_add_fixa` / `update_fixa` | cria e edita a fixa ou o parcelado: `p_confirmar`, e `p_total_cents` no lugar do valor da parcela (a edição vale daqui para frente; `p_confirmar` nulo mantém) |
+| `controlai_cancelar_fixa` / `reativar_fixa` / `del_fixa` | cancelar para de gerar do mês que vem e mantém as pendentes; reativar não ressuscita o período parado; excluir tira a regra e mantém o histórico, ou leva junto com `p_apagar_lancamentos` |
 | `controlai_renomear` / `set_email` | ajustes da carteira (o e-mail antigo continua valendo) |
 | `controlai_rotacionar_id(ledger)` | troca o uuid: a única revogação possível de um link vazado |
 | `controlai_apagar(ledger, confirmacao)` | exclusão self-service, com o id repetido como confirmação |
@@ -296,18 +372,23 @@ barras, lista, comparação) é desenhada de um JSON só, sem N+1 de rede.
 ## 8. Front
 
 ```
-js/ui.js       DOM, dinheiro em centavos (parse pt-BR/en-US), datas e meses, toast, CSV download
+js/ui.js       DOM, dinheiro em centavos (parse pt-BR/en-US), datas e meses, toast, CSV download;
+               divideParcelas/previaParcelas (a divisão do servidor, na prévia do
+               formulário), limiteNavegacao (até onde o › vai) e limitesDataEdicao
+               (a régua de data do servidor no campo de edição)
 js/report.js   agregações PURAS: por categoria (com rollup pai/filho), por forma,
-               por dia, maiores despesas, CSV
+               por dia, maiores despesas, CSV; ritmoDoMes (média e projeção, só o
+               avulso extrapolado), resumoAPagar (o card "A pagar") e andamentoFixa
+               ("3 de 10 pagas · falta R$ ...")
 js/db.js       wrapper das RPCs + fluxo de Auth da recuperação
 js/xlsx.js     gerador de .xlsx (ZIP stored + OOXML), puro e testado
 js/app.js      rotas (#/ · #/c/<uuid> · #/recuperar), telas e formulários
 ```
 
-`report.js` e os helpers de `ui.js` são puros e cobertos por `tests/unit.mjs`
-(**162 verificações**): conversão de valor, aritmética de meses (virada de ano,
-bissexto), rollup de subcategoria, despesa órfã que não some do total, ida e
-volta de formatação.
+`report.js` e os helpers de `ui.js` são puros e cobertos por `tests/unit.mjs`:
+conversão de valor, aritmética de meses (virada de ano, bissexto), rollup de
+subcategoria, despesa órfã que não some do total, ida e volta de formatação, e
+os helpers dos parcelados acima.
 
 **Rollup pai/filho:** o relatório soma a subcategoria no pai e só mostra o
 detalhamento quando o valor do pai vem de mais de uma origem — categoria folha
@@ -317,7 +398,8 @@ não ganha uma linha redundante repetindo a si mesma.
 
 ## 9. Verificação feita
 
-- `npm test` — 162/162 (inclui um leitor de ZIP que confere o CRC32 de cada parte do .xlsx gerado).
+- `npm test` — tudo passando; na v1, antes dos parcelados, eram 162 verificações (inclui um leitor de ZIP que confere o CRC32 de cada parte do .xlsx gerado).
+- `supabase/checks.sql` — asserts num Postgres 16 descartável, com o SQL aplicado duas vezes.
 - RPCs testadas via REST com a publishable key (criar, lançar com e sem forma de
   pagamento, snapshot, validações de valor zero, data futura, categoria de outra
   carteira, e-mail inválido, carteira inexistente).
@@ -339,15 +421,16 @@ não ganha uma linha redundante repetindo a si mesma.
 - **Despesas fixas**, no navegador: criar "Aluguel" de R$ 1.500 no dia 5 "até eu
   cancelar" lançou a ocorrência de setembro na hora, com o selo `fixa` na lista e
   a regra em Ajustes com editar, pausar e excluir.
-- **Conector MCP** com as 10 ferramentas: `criar_fixa` (com número de meses e
-  indeterminada), `listar_fixas` e `cancelar_fixa` por `curl` no endpoint
-  publicado; id de outra carteira é recusado.
+- **Conector MCP** na v1, então com 10 ferramentas (hoje são 14): `criar_fixa`
+  (com número de meses e indeterminada), `listar_fixas` e `cancelar_fixa` por
+  `curl` no endpoint publicado; id de outra carteira é recusado.
 - **SQL versionado aplicado do zero** num Postgres 16 limpo, na ordem
   `schema.sql → fixas.sql → api-ia.sql`, e depois de novo por cima para conferir
   a idempotência. O teste funcional rodou nesse banco descartável.
-- **Paridade repo × produção**: o md5 do corpo de cada uma das 49 funções (sem
-  comentários nem espaços) bate entre o banco criado a partir dos `.sql`
-  versionados e o banco real. O arquivo não é a intenção, é o que está rodando.
+- **Paridade repo × produção**, conferida nas fixas, antes dos parcelados: o md5
+  do corpo de cada uma das 49 funções (sem comentários nem espaços) bate entre o
+  banco criado a partir dos `.sql` versionados e o banco real. O arquivo não é a
+  intenção, é o que está rodando.
 - **Cenários de fixa conferidos no banco descartável**: mover a ocorrência de
   setembro para agosto solta da série sem duplicar nem deixar buraco; apagar
   pelo conector grava o skip; cancelar em junho e reativar mantém junho e julho
@@ -431,7 +514,9 @@ por mecanismo:
   Enter repetido na tela inicial chegava a criar duas carteiras. A guarda agora
   embrulha os sete handlers, não só o que a revisão pegou.
 - **`mesesEntre` em `js/ui.js`**, testada, no lugar de um laço mês a mês dentro
-  de `app.js`; e `seletorRepeticoes` com um estado só, sem `NaN` de sentinela.
+  de `app.js` (com os parcelados, o "faltam N" passou a vir do andamento do
+  servidor e a função foi removida); e `seletorRepeticoes` com um estado só,
+  sem `NaN` de sentinela.
 - **Eficiência**: `_catchup_fixas` sai na primeira leitura quando já está em dia;
   criar fixa não invalida mais o marcador da carteira inteira (passa o mês de
   início); `_gerar_fixas` deixou a pré-checagem redundante para o índice único;
@@ -440,10 +525,79 @@ por mecanismo:
 
 ---
 
+## 10d. Parcelados e contas a pagar
+
+Desenho completo, com o contrato de interfaces:
+[`docs/plans/2026-09-30-parcelas-a-pagar-design.md`](plans/2026-09-30-parcelas-a-pagar-design.md).
+
+Dois casos pedidos: o **parcelado no cartão** (a compra está feita; as parcelas
+dos próximos meses precisam aparecer sem nada a confirmar) e o **parcelado no
+boleto** (as parcelas aparecem e cada uma é confirmada como paga). Três
+arquiteturas foram desenhadas de forma independente e julgadas por um revisor
+adversarial que conferiu cada afirmação no código: **regra + projeção** (39/50)
+venceu **menor diff** (36/50) e **parcelas gravadas de uma vez** (30/50), que
+perdia pagamentos ao excluir a regra, desfazia ajustes a cada edição da série e
+migraria fixas de outras carteiras. O desenho final passou por mais três
+revisores (SQL, produto, excesso/completude).
+
+| # | Decisão do dono |
+|---|---|
+| D1 | A 1ª parcela do cartão cai no mês da compra; sem dia de fechamento |
+| D2 | Mês futuro mostra "Já comprometido" **separado** do gasto; "gastei" é só o que já aconteceu |
+| D3 | Parcela a pagar conta como gasto do mês do vencimento, com selo |
+| D4 | Pago/a pagar vale para fixas e parcelados; cada série diz se nasce paga ou pede confirmação; avulsa é sempre paga |
+| D5 | Sem pagar adiantado nem quitar; quitar = cancelar a série, excluir as pendentes que a quitação cobre e lançá-la como avulsa |
+| D6 | A ocorrência carrega o dia da série, no cartão e no boleto |
+| D7 | "Preciso confirmar o pagamento" vem desmarcado |
+
+O mecanismo está na seção 3. O resto:
+
+- **Bug da projeção corrigido.** `app.js` extrapolava o total inteiro do mês:
+  uma fixa de R$ 1.500 no dia 7 virava R$ 6.428 de projeção e R$ 214 "por dia".
+  Agora a conta mora em `ritmoDoMes` (`report.js`, testada): só as linhas
+  avulsas são extrapoladas; as de série entram uma vez. A correção da seção 10
+  (projetar só a partir do 7º dia) atenuava o sintoma sem tirar a causa.
+- **Totais.** "Gastei" não mudou de definição: todas as linhas do mês, pagas e
+  a pagar. O card do total ganha "Pago · A pagar"; "Contas a pagar" são todas as
+  linhas `a_pagar` da carteira, atrasada quando o vencimento é anterior a hoje;
+  no mês futuro a comparação com o mês anterior some (na IA, `variacao_pct`
+  nulo).
+- **Navegação.** O `›` vai até o último mês das séries ativas (o mês que vem,
+  nas que não têm fim); sem série, nada muda.
+- **Permissões.** O laço de `revoke ... from public` do `fixas.sql` passou de
+  `controlai\_%fixa%` para `controlai\_%` — senão `controlai_marcar_pago`
+  ficaria executável por `PUBLIC` — e toda assinatura que mudou leva
+  `drop function if exists` da antiga.
+- **Deploy em ordem: SQL → Edge Function → front.** Todo parâmetro novo tem
+  default, então o front e a Edge antigos continuam funcionando com o SQL novo.
+  O SQL vai numa transação só (`psql -1 -v ON_ERROR_STOP=1 -f schema.sql -f
+  fixas.sql -f api-ia.sql`, ou os três colados juntos no editor), porque o
+  `schema.sql` novo chama o que o `fixas.sql` cria: aplicado sozinho, deixaria o
+  app no ar chamando função que ainda não existe.
+- **`supabase/checks.sql`.** Asserts das fixas, dos parcelados e das contas a
+  pagar, para um Postgres descartável (nunca o Supabase: cria carteiras); tudo
+  roda dentro de `begin ... rollback` e não depende da data de hoje. O passo a
+  passo está no cabeçalho do arquivo.
+- **Desempenho do andamento.** `_ocorrencias` ganhou `p_recurring`: sem ele, o
+  andamento de cada série gerava os meses de todas as séries da carteira para
+  depois filtrar a dele.
+- **Conector 1.3.0**, com 14 ferramentas: `lancar_parcelado`, `marcar_pago` e
+  `contas_a_pagar` são novas; `criar_fixa` ganhou `confirmar` e `valor_total`, e
+  `editar_fixa`, `confirmar`.
+
+---
+
 ## 11. O que ficou fora da v1
 
-Orçamento/meta por categoria, despesa recorrente, receitas (o app é só de
-despesa), múltiplas moedas e anexo de comprovante. OAuth no conector MCP também
-ficou fora: para conector pessoal o claude.ai aceita servidor sem autenticação, e
-o token na URL já é o mesmo nível de segredo do link da carteira. O modelo comporta todos —
-nenhum exigiria migração destrutiva.
+Orçamento/meta por categoria, receitas (o app é só de despesa), múltiplas moedas
+e anexo de comprovante. OAuth no conector MCP também ficou fora: para conector
+pessoal o claude.ai aceita servidor sem autenticação, e o token na URL já é o
+mesmo nível de segredo do link da carteira. O modelo comporta todos — nenhum
+exigiria migração destrutiva.
+
+Dos parcelados (seção 10d), ficaram fora desta versão: **pagar adiantado e
+quitar** (D5) — quando fizer falta, é a única escrita em mês futuro e entra por
+`_gerar_fixas`; a **data do pagamento** (`pago_em`); ajustar **uma** parcela
+futura (ajusta-se quando o mês chega); "marcar todas como pagas" por série;
+colunas de situação e parcela no Excel/CSV; dia de fechamento do cartão e
+lembrete de vencimento.
