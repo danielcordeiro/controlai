@@ -188,11 +188,11 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
 .legend__val { margin-left: auto; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
 
 /* ---- barras por categoria ---- */
-.catlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.catlist { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .catrow { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-.catrow__top { display: flex; align-items: center; gap: 8px; }
+.catrow__top { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; }
 .catrow__dot { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
-.catrow__name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.catrow__name { min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .catrow__amount { margin-left: auto; font-weight: 800; white-space: nowrap; }
 .catrow__track { background: #eceef1; border-radius: 999px; height: 8px; overflow: hidden; margin: 8px 0 4px; }
 .catrow__fill { height: 100%; border-radius: 999px; }

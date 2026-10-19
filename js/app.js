@@ -15,7 +15,7 @@ import { despesasParaXLSX } from "./xlsx.js";
 
 // Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
 // conferir no aparelho que a versão nova chegou.
-const VERSAO = "1.4.0";
+const VERSAO = "1.4.1";
 
 const root = () => document.getElementById("app");
 
