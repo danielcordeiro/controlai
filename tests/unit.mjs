@@ -248,6 +248,13 @@ grupo("porFormaPagamento", () => {
   const semForma = linhas.find((l) => l.id === null);
   eq(semForma.cents, 4000, "sem forma informada é agrupado");
   eq(linhas.reduce((s, l) => s + l.pctExib, 0), 100, "percentuais exibidos somam 100");
+  // drill-down forma › categoria › lançamentos: os itens fecham com o valor de cada nível
+  for (const f of linhas) {
+    eq(totalCentavos(f.itens), f.cents, `itens de ${f.name} somam a forma`);
+    for (const c of porCategoria(f.itens, CATS)) eq(totalCentavos(c.itens), c.cents, `itens de ${f.name} › ${c.name}`);
+  }
+  const pixAlim = porCategoria(pix.itens, CATS).find((c) => c.id === "c1");
+  eq(pixAlim.itens.map((d) => d.id).join(), "e2", "subcategoria cai no pai dentro da forma");
 });
 
 grupo("montaCSV", () => {

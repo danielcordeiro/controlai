@@ -15,7 +15,7 @@ import { despesasParaXLSX } from "./xlsx.js";
 
 // Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
 // conferir no aparelho que a versão nova chegou.
-const VERSAO = "1.4.1";
+const VERSAO = "1.5.0";
 
 const root = () => document.getElementById("app");
 
@@ -638,16 +638,9 @@ function abaMes() {
 
     el("ul", { class: "catlist", style: "margin-top:12px" }, cats.map((c) => linhaCategoria(c, cats[0].cents))),
 
-    formas.length > 1 ? el("h3", { class: "section", text: "Por forma de pagamento" }) : null,
-    formas.length > 1
-      ? el("div", { class: "card" }, formas.map((f) =>
-          el("div", { style: "display:flex;gap:8px;padding:6px 0;font-size:14px" }, [
-            el("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", text: f.name }),
-            el("b", { text: fmtBRL(f.cents) }),
-            el("span", { class: "muted small", style: "width:44px;text-align:right", text: `${f.pctExib}%` }),
-          ])
-        ))
-      : null,
+    // só "Não informada" repetiria a lista de categorias acima
+    formas.some((f) => f.id != null) ? el("h3", { class: "section", text: "Por forma de pagamento" }) : null,
+    formas.some((f) => f.id != null) ? cardPorForma(formas) : null,
 
     el("h3", { class: "section", text: "Maiores despesas" }),
     el("ul", { class: "list" }, maiores.map((d) => {
@@ -1096,6 +1089,41 @@ function linhaCategoria(c, maiorValor) {
         ))
       : null,
   ]);
+}
+
+// render() refaz a tela inteira: sem isto, editar um lançamento fecharia a árvore
+const abertos = new Set();
+
+function expansivel(chave, classe, cabeca, corpo) {
+  return el("details", {
+    class: classe, open: abertos.has(chave) ? "" : null,
+    onToggle: (e) => { if (e.currentTarget.open) abertos.add(chave); else abertos.delete(chave); },
+  }, [el("summary", {}, cabeca), ...corpo]);
+}
+
+/** Forma › categoria › lançamentos, tudo com <details> nativo. */
+function cardPorForma(formas) {
+  const s = state.snapshot;
+  const catMap = new Map((s.categories || []).map((c) => [c.id, c]));
+  const formaMap = new Map((s.payment_methods || []).map((f) => [f.id, f]));
+  const hoje = hojeISO();
+  const itens = (n) => `${n} ${n === 1 ? "item" : "itens"}`;
+  return el("div", { class: "card drill" }, formas.map((f) =>
+    expansivel(`f:${f.id}`, "drill__forma", [
+      el("span", { class: "drill__name", text: f.name }),
+      el("b", { text: fmtBRL(f.cents) }),
+      el("span", { class: "muted small drill__pct", text: `${f.pctExib}%` }),
+    ], porCategoria(f.itens, s.categories || []).map((c) =>
+      expansivel(`f:${f.id}:c:${c.id}`, "drill__cat", [
+        el("span", { class: "catrow__dot", style: `background:${c.color}` }),
+        el("span", { class: "drill__name", text: c.name }),
+        el("span", { class: "muted small", text: itens(c.count) }),
+        el("b", { text: fmtBRL(c.cents) }),
+      ], [...c.itens]
+        .sort((a, b) => b.spent_on.localeCompare(a.spent_on) || b.amount_cents - a.amount_cents)
+        .map((d) => linhaDespesa(d, catMap, formaMap, hoje)))
+    ))
+  ));
 }
 
 // ---- aba DESPESAS ----------------------------------------------------------

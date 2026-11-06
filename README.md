@@ -37,7 +37,8 @@ A carteira abre em 4 abas:
   delas ainda vai pedir confirmação; com limite, quanto sobra para o dia a dia.
 - **Rosca de gastos por categoria** (SVG puro, sem libs) com legenda e %.
 - **Barras por categoria**, com detalhamento das **subcategorias** quando existem.
-- **Por forma de pagamento** (quanto foi no Pix, no cartão...).
+- **Por forma de pagamento** (quanto foi no Pix, no cartão...): toque na forma
+  para ver por categoria e na categoria para ver os lançamentos.
 - **Maiores despesas** do mês.
 
 ### 🧾 Despesas

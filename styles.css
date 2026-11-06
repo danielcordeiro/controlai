@@ -202,6 +202,20 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
 .catrow__subitem b { color: var(--ink); font-weight: 600; }
 .catrow__subitem span:last-child { margin-left: auto; white-space: nowrap; }
 
+/* ---- por forma de pagamento: forma › categoria › lançamentos ---- */
+.drill { padding: 4px 14px; }
+.drill summary { display: flex; align-items: center; gap: 8px; padding: 11px 0; cursor: pointer; list-style: none; font-size: 14px; }
+.drill summary::-webkit-details-marker { display: none; }
+.drill summary::before { content: "›"; color: #9aa3af; font-size: 18px; line-height: 1; width: 10px; flex: 0 0 auto; transition: transform .15s; }
+.drill details[open] > summary::before { transform: rotate(90deg); }
+.drill summary b { white-space: nowrap; }
+.drill__forma + .drill__forma { border-top: 1px solid var(--line); }
+.drill__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drill__pct { width: 36px; text-align: right; flex: 0 0 auto; }
+.drill__cat { margin-left: 18px; }
+.drill__cat > summary { font-size: 13.5px; padding: 8px 0; }
+.drill__cat .small { white-space: nowrap; }
+
 /* ---- lista de despesas ---- */
 .daygroup { margin-bottom: 14px; }
 .daygroup__head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 4px 6px; font-size: 12.5px; }
@@ -256,7 +270,7 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
 .chip--add { border-style: dashed; color: var(--muted); }
 
 /* ---- listas simples (categorias / formas) ---- */
-.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .list__item {
   display: flex; align-items: center; gap: 10px;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px;

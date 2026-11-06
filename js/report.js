@@ -47,7 +47,7 @@ function porValorDepoisNome(a, b) {
 /**
  * Gasto por categoria, com rollup de subcategoria no pai.
  *
- * Devolve: [{ id, name, color, cents, pct, count, subs: [{ id, name, cents, pct, count }] }]
+ * Devolve: [{ id, name, color, cents, pct, count, itens, subs: [{ id, name, cents, pct, count }] }]
  * ordenado por valor decrescente. `subs` só vem preenchido quando o valor do pai
  * se divide em mais de uma origem (subcategorias e/ou lançamentos direto no pai) —
  * uma categoria folha não ganha detalhamento redundante.
@@ -71,10 +71,11 @@ export function porCategoria(despesas, categorias) {
     const cents = d.amount_cents || 0;
     const topo = topoDe(d.category_id) || SEM_CATEGORIA;
     const chave = topo.id;
-    if (!grupos.has(chave)) grupos.set(chave, { cat: topo, cents: 0, count: 0, origens: new Map() });
+    if (!grupos.has(chave)) grupos.set(chave, { cat: topo, cents: 0, count: 0, itens: [], origens: new Map() });
     const g = grupos.get(chave);
     g.cents += cents;
     g.count += 1;
+    g.itens.push(d);
 
     // origem = a própria categoria lançada (subcategoria ou o pai direto)
     const propria = porId.get(d.category_id);
@@ -106,6 +107,7 @@ export function porCategoria(despesas, categorias) {
         color: g.cat.color || SEM_CATEGORIA.color,
         cents: g.cents,
         count: g.count,
+        itens: g.itens,
         pct: pctDe(g.cents, total),
         subs,
       };
@@ -116,7 +118,7 @@ export function porCategoria(despesas, categorias) {
 /**
  * Gasto por forma de pagamento. Despesa sem forma (o campo é opcional) entra
  * numa linha "Não informada" — nunca é descartada.
- * Devolve: [{ id, name, cents, pct, count }] por valor decrescente.
+ * Devolve: [{ id, name, cents, pct, count, itens }] por valor decrescente.
  */
 export function porFormaPagamento(despesas, formas) {
   const porId = new Map((formas || []).map((f) => [f.id, f]));
@@ -126,10 +128,11 @@ export function porFormaPagamento(despesas, formas) {
     const f = d.payment_method_id ? porId.get(d.payment_method_id) : null;
     const id = f ? f.id : SEM_FORMA.id;
     const name = f ? f.name : SEM_FORMA.name;
-    if (!grupos.has(id)) grupos.set(id, { id, name, cents: 0, count: 0 });
+    if (!grupos.has(id)) grupos.set(id, { id, name, cents: 0, count: 0, itens: [] });
     const g = grupos.get(id);
     g.cents += d.amount_cents || 0;
     g.count += 1;
+    g.itens.push(d);
   }
 
   const total = totalCentavos(despesas);
