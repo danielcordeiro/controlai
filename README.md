@@ -39,6 +39,8 @@ A carteira abre em 4 abas:
 - **Barras por categoria**, com detalhamento das **subcategorias** quando existem.
 - **Por forma de pagamento** (quanto foi no Pix, no cartão...): toque na forma
   para ver por categoria e na categoria para ver os lançamentos.
+- **Relatório do mês em PDF**, na mesma ordem (forma › categoria › lançamento),
+  com subtotais. Sai pela impressão do navegador: escolha "Salvar como PDF".
 - **Maiores despesas** do mês.
 
 ### 🧾 Despesas

@@ -374,3 +374,26 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
 .donate__sub { margin: 0 auto 14px; max-width: 380px; color: var(--muted); font-size: 13px; }
 .donate .btn { display: inline-flex; }
 .donate__name { margin: 10px 0 0; }
+
+/* ---- relatório do mês: só existe na impressão ("Salvar como PDF") ---- */
+.relatorio { display: none; }
+@media print {
+  @page { margin: 14mm 12mm; }
+  body { background: #fff; }
+  body > :not(.relatorio) { display: none !important; }
+  .relatorio { display: block; color: #000; font-size: 10.5pt; }
+  .relatorio h1 { font-size: 17pt; }
+  .relatorio__sub { color: #555; margin: 2px 0 10px; }
+  .relatorio__total { margin: 0 0 6px; padding-bottom: 8px; border-bottom: 2px solid #000; }
+  .relatorio h2 {
+    display: flex; justify-content: space-between; gap: 12px;
+    font-size: 12.5pt; margin: 16px 0 4px; padding-bottom: 3px; border-bottom: 1px solid #000; break-after: avoid;
+  }
+  .relatorio table { width: 100%; border-collapse: collapse; margin: 8px 0 4px; }
+  .relatorio th { text-align: left; padding: 3px 0; border-bottom: 1px solid #999; }
+  .relatorio td { padding: 3px 0; border-bottom: 1px solid #e3e3e3; vertical-align: top; }
+  .relatorio td:first-child { width: 3.4em; color: #555; }
+  .relatorio th:last-child, .relatorio td:last-child { text-align: right; white-space: nowrap; padding-left: 10px; }
+  .relatorio tr { break-inside: avoid; }
+  .relatorio__det { color: #666; font-size: 9pt; }
+}

@@ -173,7 +173,7 @@ grupo("variacaoPct", () => {
 // ---------------------------------------------------------------- agregação do mês
 const {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
-  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal,
+  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal, arvoreFormas,
 } = await import("../js/report.js");
 
 const CATS = [
@@ -248,13 +248,26 @@ grupo("porFormaPagamento", () => {
   const semForma = linhas.find((l) => l.id === null);
   eq(semForma.cents, 4000, "sem forma informada é agrupado");
   eq(linhas.reduce((s, l) => s + l.pctExib, 0), 100, "percentuais exibidos somam 100");
-  // drill-down forma › categoria › lançamentos: os itens fecham com o valor de cada nível
-  for (const f of linhas) {
+});
+
+grupo("arvoreFormas (forma › categoria › lançamentos)", () => {
+  const arv = arvoreFormas(DESP, CATS, FORMAS);
+  eq(arv.map((f) => f.id).join(), "f2,f1,", "formas por valor, 'Não informada' entra");
+  for (const f of arv) {
     eq(totalCentavos(f.itens), f.cents, `itens de ${f.name} somam a forma`);
-    for (const c of porCategoria(f.itens, CATS)) eq(totalCentavos(c.itens), c.cents, `itens de ${f.name} › ${c.name}`);
+    eq(f.cats.reduce((s, c) => s + c.cents, 0), f.cents, `categorias de ${f.name} somam a forma`);
+    for (const c of f.cats) eq(totalCentavos(c.itens), c.cents, `itens de ${f.name} › ${c.name}`);
   }
-  const pixAlim = porCategoria(pix.itens, CATS).find((c) => c.id === "c1");
+  const pixAlim = arv[0].cats.find((c) => c.id === "c1");
   eq(pixAlim.itens.map((d) => d.id).join(), "e2", "subcategoria cai no pai dentro da forma");
+  const semForma = arv.find((f) => f.id === null);
+  eq(semForma.cats.map((c) => c.id).join(), "c2,c1", "categorias dentro da forma por valor");
+  const ordem = arvoreFormas([
+    { id: "b", spent_on: "2026-09-05", amount_cents: 100, category_id: "c2" },
+    { id: "a", spent_on: "2026-09-01", amount_cents: 100, category_id: "c2" },
+    { id: "c", spent_on: "2026-09-05", amount_cents: 900, category_id: "c2" },
+  ], CATS, FORMAS)[0].cats[0].itens.map((d) => d.id).join();
+  eq(ordem, "a,c,b", "lançamentos por data; no mesmo dia, o maior primeiro");
 });
 
 grupo("montaCSV", () => {

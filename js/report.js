@@ -143,6 +143,21 @@ export function porFormaPagamento(despesas, formas) {
 }
 
 /**
+ * Forma › categoria › lançamentos: o card "Por forma de pagamento" e o relatório
+ * em PDF. Lançamentos em ordem de data (no empate, o maior primeiro).
+ */
+export function arvoreFormas(despesas, categorias, formas) {
+  return porFormaPagamento(despesas, formas).map((f) => ({
+    ...f,
+    cats: porCategoria(f.itens, categorias).map((c) => ({
+      ...c,
+      itens: [...c.itens].sort((a, b) =>
+        a.spent_on.localeCompare(b.spent_on) || (b.amount_cents || 0) - (a.amount_cents || 0)),
+    })),
+  }));
+}
+
+/**
  * Despesas agrupadas por dia, do mais recente para o mais antigo.
  * Devolve: [{ dia: "YYYY-MM-DD", cents, itens: [despesa] }]
  */

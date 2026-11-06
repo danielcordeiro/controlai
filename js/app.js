@@ -8,14 +8,14 @@ import {
   limitesDataEdicao,
 } from "./ui.js";
 import {
-  porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
-  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal,
+  porCategoria, porDia, totalCentavos, maioresDespesas, montaCSV,
+  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal, arvoreFormas,
 } from "./report.js";
 import { despesasParaXLSX } from "./xlsx.js";
 
 // Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
 // conferir no aparelho que a versão nova chegou.
-const VERSAO = "1.5.0";
+const VERSAO = "1.6.0";
 
 const root = () => document.getElementById("app");
 
@@ -615,7 +615,7 @@ function abaMes() {
   }
 
   const cats = porCategoria(desp, s.categories || []);
-  const formas = porFormaPagamento(desp, s.payment_methods || []);
+  const arvore = arvoreFormas(desp, s.categories || [], s.payment_methods || []);
   const maiores = maioresDespesas(desp, 5);
   // média e projeção vêm do servidor (_orcamento), a mesma conta que a IA lê
   const mediaDia = totalOrcamento()?.media_dia_cents ?? null;
@@ -639,8 +639,8 @@ function abaMes() {
     el("ul", { class: "catlist", style: "margin-top:12px" }, cats.map((c) => linhaCategoria(c, cats[0].cents))),
 
     // só "Não informada" repetiria a lista de categorias acima
-    formas.some((f) => f.id != null) ? el("h3", { class: "section", text: "Por forma de pagamento" }) : null,
-    formas.some((f) => f.id != null) ? cardPorForma(formas) : null,
+    arvore.some((f) => f.id != null) ? el("h3", { class: "section", text: "Por forma de pagamento" }) : null,
+    arvore.some((f) => f.id != null) ? cardPorForma(arvore) : null,
 
     el("h3", { class: "section", text: "Maiores despesas" }),
     el("ul", { class: "list" }, maiores.map((d) => {
@@ -655,8 +655,69 @@ function abaMes() {
       ]);
     })),
 
+    el("button", {
+      class: "btn btn--ghost btn--block", type: "button", style: "margin-top:16px",
+      text: "📄 Relatório do mês em PDF", onClick: () => imprimirRelatorio(arvore, total, aPagar),
+    }),
+
     cardApoio(),
   ]);
+}
+
+/**
+ * Relatório do mês pela impressão do navegador ("Salvar como PDF"): texto
+ * selecionável, quebra de página do próprio navegador e nenhuma lib. Fora da
+ * impressão o bloco fica escondido; o título vira o nome sugerido do arquivo.
+ */
+function imprimirRelatorio(arvore, total, aPagar) {
+  const s = state.snapshot;
+  const cats = new Map((s.categories || []).map((c) => [c.id, c]));
+  const hoje = hojeISO();
+  const n = (s.expenses || []).length;
+  const detalhe = (d) => {
+    const cat = cats.get(d.category_id);
+    return [
+      cat?.parent_id ? cat.name : null,
+      d.parcelas ? `parcela ${d.parcela}/${d.parcelas}` : d.recurring_id ? "fixa" : null,
+      !d.a_pagar ? null : d.spent_on < hoje ? "atrasada" : "a pagar",
+    ].filter(Boolean).join(" · ");
+  };
+
+  document.querySelector(".relatorio")?.remove();
+  const rel = el("div", { class: "relatorio" }, [
+    el("h1", { text: `Relatório de ${mesExtenso(state.mes)}` }),
+    el("p", { class: "relatorio__sub",
+      text: `${s.ledger.name} · gerado em ${dataCurta(hoje)}/${hoje.slice(0, 4)} pelo Controlaí` }),
+    el("p", { class: "relatorio__total" }, [
+      "Total do mês ", el("b", { text: fmtBRL(total) }),
+      ` · ${n} ${n === 1 ? "lançamento" : "lançamentos"}`,
+      aPagar ? ` · pago ${fmtBRL(total - aPagar)} · a pagar ${fmtBRL(aPagar)}` : "",
+    ]),
+    ...arvore.map((f) => el("section", {}, [
+      el("h2", {}, [el("span", { text: f.name }), el("span", { text: `${fmtBRL(f.cents)} · ${f.pctExib}%` })]),
+      ...f.cats.map((c) => el("table", {}, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { colspan: "2", text: c.name }),
+          el("th", { text: fmtBRL(c.cents) }),
+        ])),
+        el("tbody", {}, c.itens.map((d) => el("tr", {}, [
+          el("td", { text: dataCurta(d.spent_on) }),
+          el("td", {}, [
+            d.description || cats.get(d.category_id)?.name || "Despesa",
+            detalhe(d) ? el("span", { class: "relatorio__det", text: ` · ${detalhe(d)}` }) : null,
+          ]),
+          el("td", { text: fmtBRL(d.amount_cents) }),
+        ]))),
+      ])),
+    ])),
+  ]);
+
+  const titulo = document.title;
+  document.title = arquivoBase(s.ledger.name, `relatorio-${state.mes}`);
+  document.body.append(rel);
+  window.addEventListener("afterprint", () => { document.title = titulo; rel.remove(); }, { once: true });
+  db.track("exportar_pdf", "carteira");
+  window.print();
 }
 
 /**
@@ -1102,26 +1163,24 @@ function expansivel(chave, classe, cabeca, corpo) {
 }
 
 /** Forma › categoria › lançamentos, tudo com <details> nativo. */
-function cardPorForma(formas) {
+function cardPorForma(arvore) {
   const s = state.snapshot;
   const catMap = new Map((s.categories || []).map((c) => [c.id, c]));
   const formaMap = new Map((s.payment_methods || []).map((f) => [f.id, f]));
   const hoje = hojeISO();
   const itens = (n) => `${n} ${n === 1 ? "item" : "itens"}`;
-  return el("div", { class: "card drill" }, formas.map((f) =>
+  return el("div", { class: "card drill" }, arvore.map((f) =>
     expansivel(`f:${f.id}`, "drill__forma", [
       el("span", { class: "drill__name", text: f.name }),
       el("b", { text: fmtBRL(f.cents) }),
       el("span", { class: "muted small drill__pct", text: `${f.pctExib}%` }),
-    ], porCategoria(f.itens, s.categories || []).map((c) =>
+    ], f.cats.map((c) =>
       expansivel(`f:${f.id}:c:${c.id}`, "drill__cat", [
         el("span", { class: "catrow__dot", style: `background:${c.color}` }),
         el("span", { class: "drill__name", text: c.name }),
         el("span", { class: "muted small", text: itens(c.count) }),
         el("b", { text: fmtBRL(c.cents) }),
-      ], [...c.itens]
-        .sort((a, b) => b.spent_on.localeCompare(a.spent_on) || b.amount_cents - a.amount_cents)
-        .map((d) => linhaDespesa(d, catMap, formaMap, hoje)))
+      ], c.itens.map((d) => linhaDespesa(d, catMap, formaMap, hoje)))
     ))
   ));
 }
@@ -2122,12 +2181,12 @@ function abaAjustes() {
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
-/** "Casa do Daniel" -> "controlai-casa-do-daniel-2026-09" */
-function arquivoBase(nome) {
+/** "Casa do Daniel" -> "controlai-casa-do-daniel-2026-09-06" (o sufixo padr\u00e3o \u00e9 hoje) */
+function arquivoBase(nome, sufixo = hojeISO()) {
   const limpo = String(nome || "despesas")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\W+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "despesas";
-  return `controlai-${limpo}-${hojeISO()}`;
+  return `controlai-${limpo}-${sufixo}`;
 }
 
 const PALETA = ["#8b5cf6", "#ef4444", "#f97316", "#3b82f6", "#10b981", "#6366f1",
