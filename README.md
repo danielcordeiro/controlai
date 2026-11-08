@@ -200,6 +200,13 @@ Mesmo modelo do [Rachaí](https://github.com/danielcordeiro/rachai), um passo ma
    `pg_temp` em todas elas.
 6. O link é uma chave portadora, então existe revogação: **gerar um ID novo** em
    Ajustes invalida o anterior.
+7. **Senha opcional** (Ajustes › Senha): com ela, o link sozinho não abre mais a
+   carteira. A conferência é no servidor, em `controlai._ledger_ok`, por onde
+   passa toda RPC do app: cada aparelho entra com a senha e recebe uma sessão de
+   30 dias, mandada no cabeçalho `x-controlai-sessao`. O banco guarda só o hash
+   bcrypt da senha e o sha256 da sessão; 5 senhas erradas bloqueiam por 15
+   minutos. Esqueceu: confirme o e-mail de recuperação **atual** em "Recuperar"
+   e remova a senha. O conector de IA segue pelo token próprio.
 
 A `publishable key` no `config.js` é **pública por design** (é o que o navegador usa);
 o que protege os dados é o modelo acima.

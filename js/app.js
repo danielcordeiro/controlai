@@ -15,7 +15,7 @@ import { despesasParaXLSX } from "./xlsx.js";
 
 // Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
 // conferir no aparelho que a versão nova chegou.
-const VERSAO = "1.7.0";
+const VERSAO = "1.8.0";
 
 const root = () => document.getElementById("app");
 
@@ -108,6 +108,7 @@ async function carregar() {
   const idPedido = state.ledgerId;
   state.loading = true;
   state.erro = null;
+  state.precisaSenha = false;
   render();
   try {
     const snap = await db.mes(idPedido, state.mes);
@@ -119,6 +120,7 @@ async function carregar() {
     if (meu !== reqAtual) return;
     state.snapshot = null;
     state.erro = e.message;
+    state.precisaSenha = !!e.senha;
   } finally {
     if (meu === reqAtual) {
       state.loading = false;
@@ -141,6 +143,7 @@ async function recarregar(mes = state.mes) {
     state.snapshot = snap;
   } catch (e) {
     if (meu !== reqAtual) return;
+    if (e.senha) return carregar();          // senha trocada/removida em outro aparelho
     toast(e.message, "error");
   }
   if (meu === reqAtual) render();
@@ -161,7 +164,7 @@ function render() {
   if (r.name === "recuperar") return renderRecuperar();
   if (r.name === "home") return renderHome();
   if (state.loading && !state.snapshot) return renderCarregando();
-  if (state.erro) return renderErro(state.erro);
+  if (state.erro) return state.precisaSenha ? renderSenha() : renderErro(state.erro);
   if (state.snapshot) return renderCarteira();
   return renderCarregando();
 }
@@ -204,6 +207,31 @@ function renderErro(msg) {
       el("div", {}, [el("a", { class: "btn btn--ghost btn--block", href: "#/", text: "Voltar ao início" })]),
     ]),
   ]));
+}
+
+function renderSenha() {
+  const senha = el("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Senha", required: "" });
+  const msg = el("p", { class: "small", role: "alert", style: "margin:8px 0 0;color:var(--neg)" });
+  const entrar = acaoUnica(async () => {
+    msg.textContent = "";
+    try {
+      const r = await db.entrar(state.ledgerId, senha.value);
+      if (r?.erro) { msg.textContent = r.erro; senha.select(); return; }
+      await carregar();
+    } catch (e) { msg.textContent = e.message; }
+  });
+  shell(header(), el("main", { class: "wrap" }, [
+    el("form", { class: "card", onSubmit: (ev) => { ev.preventDefault(); entrar(); } }, [
+      el("h2", { class: "sheet__title", text: "Esta carteira tem senha" }),
+      el("p", { class: "small muted", style: "margin:6px 0 10px", text: "Digite a senha para abrir. Este aparelho fica liberado por 30 dias." }),
+      senha,
+      msg,
+      el("button", { class: "btn btn--primary btn--block", type: "submit", text: "Entrar" }),
+      el("a", { class: "btn btn--ghost btn--block", href: "#/recuperar", text: "Esqueci a senha (remover pelo e-mail)" }),
+      el("a", { class: "btn btn--ghost btn--block", href: "#/", text: "Voltar ao início" }),
+    ]),
+  ]));
+  senha.focus();
 }
 
 // ---------------------------------------------------------------------------
@@ -394,8 +422,21 @@ async function renderMinhasCarteiras(email) {
       el("li", { class: "list__item" }, [
         el("div", { style: "flex:1;min-width:0" }, [
           el("div", { class: "list__name", text: c.name || "Minhas despesas" }),
-          el("div", { class: "list__sub", text: `${c.despesas || 0} despesa(s) · criada em ${String(c.created_at || "").slice(0, 10).split("-").reverse().join("/")}` }),
+          el("div", { class: "list__sub", text: `${c.despesas || 0} despesa(s) · criada em ${String(c.created_at || "").slice(0, 10).split("-").reverse().join("/")}${c.tem_senha ? " · com senha" : ""}` }),
         ]),
+        c.tem_senha && el("button", {
+          class: "btn btn--ghost btn--sm",
+          text: "Remover senha",
+          onClick: async (ev) => {
+            const b = ev.currentTarget;
+            if (!confirmAction(`Remover a senha de "${c.name}"? Quem tiver o link volta a abrir a carteira até você definir outra em Ajustes.`)) return;
+            try {
+              await auth.removerSenha(c.id);
+              b.remove();
+              toast("Senha removida. Abra a carteira e defina uma nova em Ajustes.", "success");
+            } catch (e) { toast(e.message, "error"); }
+          },
+        }),
         el("a", {
           class: "btn btn--primary btn--sm",
           href: `#/c/${c.id}`,
@@ -2147,6 +2188,46 @@ function montaPromptIA(base, anon, token) {
 }
 
 // ---- aba AJUSTES -----------------------------------------------------------
+function cardSenha() {
+  const s = state.snapshot;
+  const tem = !!s.ledger.tem_senha;
+  const nova = el("input", { class: "input", type: "password", autocomplete: "new-password", minlength: "6", maxlength: "72", required: "" });
+  const salvar = acaoUnica(async (valor, ok) => {
+    try {
+      await db.setSenha(state.ledgerId, valor);
+      await recarregar();
+      toast(ok, "success");
+    } catch (e) { toast(e.message, "error"); }
+  });
+
+  return el("div", { class: "card" }, [
+    el("h3", { class: "sheet__title", text: "Senha" }),
+    el("p", { class: "small muted", style: "margin:6px 0 10px", text: tem
+      ? "Cada aparelho novo pede a senha (e fica liberado por 30 dias). Trocar a senha desconecta os outros aparelhos."
+      : `Opcional. Com senha, quem tiver só o link não abre a carteira. Se esquecer, você remove a senha confirmando o e-mail de recuperação (${s.ledger.email}): confira se ele é seu.` }),
+    el("form", {
+      onSubmit: (ev) => {
+        ev.preventDefault();
+        salvar(nova.value, tem ? "Senha trocada. Os outros aparelhos vão pedir a nova." : "Senha definida.");
+      },
+    }, [
+      el("input", { type: "text", autocomplete: "username", value: s.ledger.email, hidden: "", readonly: "" }),
+      el("label", { class: "label", text: tem ? "Nova senha (mínimo 6 caracteres)" : "Senha (mínimo 6 caracteres)" }), nova,
+      el("button", { class: "btn btn--primary btn--block", type: "submit", text: tem ? "Trocar senha" : "Definir senha" }),
+    ]),
+    tem && el("div", { class: "row2" }, [
+      el("button", { class: "btn btn--ghost", text: "Sair deste aparelho", onClick: async () => {
+        await db.sair(state.ledgerId).catch(() => {});
+        carregar();
+      } }),
+      el("button", { class: "btn btn--ghost", text: "Remover senha", onClick: () => {
+        if (!confirmAction("Remover a senha? Quem tiver o link volta a abrir a carteira.")) return;
+        salvar(null, "Senha removida.");
+      } }),
+    ]),
+  ]);
+}
+
 function abaAjustes() {
   const s = state.snapshot;
   const link = `${location.origin}${location.pathname}#/c/${s.ledger.id}`;
@@ -2168,6 +2249,8 @@ function abaAjustes() {
         } }),
       ]),
     ]),
+
+    cardSenha(),
 
     el("div", { class: "card" }, [
       el("h3", { class: "sheet__title", text: "Carteira" }),

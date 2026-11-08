@@ -956,5 +956,100 @@ begin
   raise notice '13. receita, natureza e DRE: ok';
 end $$;
 
+-- 14. Senha opcional ---------------------------------------------------------
+-- auth.jwt() do shim devolve null; aqui (dentro do rollback) ele lê checks.jwt
+create or replace function auth.jwt() returns jsonb language sql stable
+  as $f$ select nullif(current_setting('checks.jwt', true), '')::jsonb $f$;
+create function pg_temp.sessao(p text) returns void language sql as $f$
+  select set_config('request.headers', json_build_object('x-controlai-sessao', p)::text, true)
+$f$;
+
+do $$
+declare
+  v_l   uuid := pg_temp.carteira();
+  v_t   text := public.controlai_get_api_token(v_l);
+  v_mor uuid := pg_temp.cat(v_l, 'Moradia');
+  tok text; tok2 text; j json; v_novo uuid;
+begin
+  perform pg_temp.ok(not (public.controlai_mes(v_l, null)->'ledger'->>'tem_senha')::boolean,
+                     'carteira nasce sem senha e abre só com o link');
+  perform pg_temp.ok(public.controlai_entrar(v_l, 'qualquer')->>'token' is null,
+                     'entrar em carteira sem senha não cria sessão');
+  perform pg_temp.falha(format('select public.controlai_set_senha(%L, ''12345'')', v_l), '6 a 72');
+
+  tok := public.controlai_set_senha(v_l, 'segredo1');
+  perform pg_temp.ok(length(tok) = 64, 'definir senha devolve a sessão de quem definiu');
+  perform pg_temp.ok((select senha_hash like '$2a$%' from controlai.ledger where id = v_l),
+                     'guarda só o hash bcrypt');
+
+  perform pg_temp.sessao('');
+  perform pg_temp.falha(format('select public.controlai_mes(%L, null)', v_l), 'tem senha');
+  perform pg_temp.falha(format('select public.controlai_add_despesa(%L, current_date, 100, %L, null, null)', v_l, v_mor), 'tem senha');
+  perform pg_temp.falha(format('select public.controlai_exportar(%L)', v_l), 'tem senha');
+  perform pg_temp.falha(format('select public.controlai_get_api_token(%L)', v_l), 'tem senha');
+  perform pg_temp.falha(format('select public.controlai_set_senha(%L, null)', v_l), 'tem senha');
+  perform pg_temp.sessao('token-inventado');
+  perform pg_temp.falha(format('select public.controlai_mes(%L, null)', v_l), 'tem senha');
+
+  perform pg_temp.ok(public.controlai_api_contexto(v_t)->>'carteira' is not null,
+                     'conector segue pelo token próprio, sem sessão');
+
+  perform pg_temp.sessao(tok);
+  perform pg_temp.ok((public.controlai_mes(v_l, null)->'ledger'->>'tem_senha')::boolean,
+                     'com a sessão a carteira abre e avisa que tem senha');
+
+  -- senha errada conta; a 5ª bloqueia, inclusive a senha certa
+  perform pg_temp.sessao('');
+  perform pg_temp.ok(public.controlai_entrar(v_l, 'errada')->>'erro' = 'Senha incorreta.', 'senha errada');
+  perform pg_temp.ok((select senha_falhas from controlai.ledger where id = v_l) = 1,
+                     'a tentativa errada fica gravada (sem exceção que a desfaça)');
+  j := public.controlai_entrar(v_l, 'segredo1');
+  perform pg_temp.ok(length(j->>'token') = 64 and (select senha_falhas from controlai.ledger where id = v_l) = 0,
+                     'senha certa entra e zera as tentativas');
+  tok2 := j->>'token';
+  for i in 1..5 loop perform public.controlai_entrar(v_l, 'errada'); end loop;
+  perform pg_temp.ok(public.controlai_entrar(v_l, 'segredo1')->>'erro' like 'Muitas tentativas%',
+                     '5 erros bloqueiam até a senha certa');
+  update controlai.ledger set senha_bloqueio_ate = now() - interval '1 second' where id = v_l;
+  perform pg_temp.ok(public.controlai_entrar(v_l, 'segredo1')->>'token' is not null, 'passado o bloqueio, entra');
+
+  -- sair derruba só a sessão deste aparelho
+  perform pg_temp.sessao(tok2);
+  perform public.controlai_sair(v_l);
+  perform pg_temp.falha(format('select public.controlai_mes(%L, null)', v_l), 'tem senha');
+  perform pg_temp.sessao(tok);
+  perform public.controlai_mes(v_l, null);
+
+  -- trocar a senha derruba os outros aparelhos e mantém quem trocou
+  tok2 := public.controlai_set_senha(v_l, 'segredo2');
+  perform pg_temp.falha(format('select public.controlai_mes(%L, null)', v_l), 'tem senha');
+  perform pg_temp.sessao(tok2);
+  perform public.controlai_mes(v_l, null);
+
+  -- sessão vencida não vale; trocar o id leva as sessões
+  update controlai.ledger_sessao set expira_em = now() - interval '1 second'
+   where token_hash = encode(sha256(convert_to(tok2, 'UTF8')), 'hex');
+  perform pg_temp.falha(format('select public.controlai_mes(%L, null)', v_l), 'tem senha');
+  update controlai.ledger_sessao set expira_em = now() + interval '1 day' where ledger_id = v_l;
+  v_novo := public.controlai_rotacionar_id(v_l);
+  perform public.controlai_mes(v_novo, null);
+  v_l := v_novo;
+
+  -- recuperação: só o e-mail de recuperação ATUAL remove a senha
+  perform set_config('checks.jwt', '', true);
+  perform pg_temp.falha(format('select public.controlai_remover_senha_pelo_email(%L)', v_l), 'Confirme o e-mail');
+  perform set_config('checks.jwt', '{"email":"outro@exemplo.com"}', true);
+  perform pg_temp.falha(format('select public.controlai_remover_senha_pelo_email(%L)', v_l), 'e-mail de recuperação atual');
+  perform set_config('checks.jwt', '{"email":"Teste@Exemplo.com"}', true);
+  perform pg_temp.ok((select (x->>'tem_senha')::boolean from json_array_elements(public.controlai_meus_ids()) x
+                       where (x->>'id')::uuid = v_l), 'minhas carteiras mostra quem tem senha');
+  perform public.controlai_remover_senha_pelo_email(v_l);
+  perform pg_temp.sessao('');
+  perform pg_temp.ok(not (public.controlai_mes(v_l, null)->'ledger'->>'tem_senha')::boolean
+                     and not exists (select 1 from controlai.ledger_sessao where ledger_id = v_l),
+                     'removida pelo e-mail, abre só com o link e sem sessões sobrando');
+  raise notice '14. senha: ok';
+end $$;
+
 select 'checks ok: ' || current_setting('checks.n') as resultado;
 rollback;

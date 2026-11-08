@@ -761,6 +761,50 @@ acumulado do ano.
 
 ---
 
+## 10g. Senha opcional (1.8.0)
+
+O link é a chave portadora; a senha é uma segunda chave, opcional, por carteira.
+Precisa ser conferida no servidor (uma senha só na tela cai para quem chama a
+RPC direto com o link), e sem mexer na assinatura das 24 RPCs que recebem
+`p_ledger`: todas já passam por `controlai._ledger_ok`, então a regra mora ali.
+
+**Sessão por cabeçalho.** `controlai_entrar(ledger, senha)` confere o bcrypt
+(`crypt`, pgcrypto no schema `extensions` do Supabase) e devolve um token
+aleatório (dois uuid v4, 244 bits); o banco guarda o sha256 em
+`controlai.ledger_sessao`, com validade de 30 dias. O `rpc()` do front manda o
+token da carteira do `p_ledger` no cabeçalho `x-controlai-sessao` (`setHeader`
+do supabase-js; o CORS do Supabase aceita o cabeçalho, conferido no preflight),
+e `_ledger_ok` o lê de `request.headers`. Sem sessão válida, o erro sai com
+`hint = 'controlai_senha'` e o front troca a tela pela de senha.
+
+**Tentativas.** Senha errada devolve `{erro}` em vez de exceção, senão o
+rollback desfaria a contagem; 5 erros seguidos bloqueiam por 15 minutos (até a
+senha certa). **Trocar** a senha apaga as sessões de todos os aparelhos e
+devolve uma nova para quem trocou; **remover** apaga todas. **Sair deste
+aparelho** apaga só a sessão atual. Trocar o id da carteira leva as sessões
+(`on update cascade`) e o front muda o token de chave.
+
+**Esqueci a senha.** `controlai_remover_senha_pelo_email` só aceita o e-mail de
+recuperação **atual** (do JWT do Supabase Auth), não o histórico de
+`ledger_email`: quem teve o link pode ter cadastrado o próprio e-mail antes, e é
+justamente quem a senha quer barrar. Por isso o card de senha mostra o e-mail
+de recuperação e pede para conferir. Carteira com senha e e-mail perdido não
+tem volta (o app avisa ao definir).
+
+**Conector de IA** não muda: entra pelo token próprio (`_por_token`), que já é
+um segredo separado do link; trocar o token continua em Ajustes › IA.
+
+Verificado: `checks.sql` bloco 14 (25 asserts: sem senha abre pelo link;
+6 a 72 caracteres; só hash; sem sessão ou com token inventado todas as RPCs
+barram; conector segue; contagem e bloqueio; sair; trocar derruba os outros;
+sessão vencida; rotacionar id; recuperação só pelo e-mail atual) e a tela no
+navegador contra um servidor simulado.
+
+Ficou fora: "sair de todos os aparelhos" sem trocar a senha; sessão que se
+renova com o uso (hoje vence em 30 dias fixos); senha para o conector.
+
+---
+
 ## 11. O que ficou fora da v1
 
 Múltiplas moedas e anexo de comprovante. OAuth no conector MCP também ficou fora: para conector

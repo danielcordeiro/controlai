@@ -53,6 +53,22 @@ create table if not exists controlai.ledger_email (
 );
 create index if not exists ledger_email_email_idx on controlai.ledger_email (email);
 
+-- Senha opcional. Sem senha, o link basta (como sempre foi). Com senha, cada
+-- aparelho precisa de uma sessão: a senha é conferida em controlai_entrar, que
+-- devolve um token; o app o manda no cabeçalho x-controlai-sessao e _ledger_ok
+-- confere. Guardamos só o hash bcrypt da senha e o sha256 do token.
+alter table controlai.ledger add column if not exists senha_hash text;
+alter table controlai.ledger add column if not exists senha_falhas integer not null default 0;
+alter table controlai.ledger add column if not exists senha_bloqueio_ate timestamptz;
+
+create table if not exists controlai.ledger_sessao (
+  token_hash text primary key,
+  ledger_id  uuid not null references controlai.ledger(id) on update cascade on delete cascade,
+  criada_em  timestamptz not null default now(),
+  expira_em  timestamptz not null default now() + interval '30 days'
+);
+create index if not exists ledger_sessao_ledger_idx on controlai.ledger_sessao (ledger_id);
+
 -- Plano de contas: até 2 níveis (categoria > subcategoria).
 create table if not exists controlai.category (
   id         uuid primary key default gen_random_uuid(),
@@ -145,6 +161,7 @@ alter table controlai.payment_method enable row level security;
 alter table controlai.expense        enable row level security;
 alter table controlai.ledger_email   enable row level security;
 alter table controlai.limite         enable row level security;
+alter table controlai.ledger_sessao  enable row level security;
 
 -- ============================================================================
 -- Helpers internos (schema controlai, NÃO expostos)
@@ -198,18 +215,52 @@ begin
 end;
 $$;
 
+-- sha256 do token de sessão que veio no cabeçalho (o PostgREST expõe os
+-- cabeçalhos em request.headers, com o nome em minúsculas).
+create or replace function controlai._sessao_atual()
+returns text
+language sql
+stable
+as $$
+  select encode(sha256(convert_to(coalesce(
+    nullif(current_setting('request.headers', true), '')::json ->> 'x-controlai-sessao', ''), 'UTF8')), 'hex')
+$$;
+
 -- Garante que a carteira existe (e devolve o id). Erro claro se o link for velho.
+-- Carteira com senha exige uma sessão válida: TODA RPC do app passa por aqui,
+-- então a senha vale para tudo (ler, lançar, exportar, trocar id, apagar).
 create or replace function controlai._ledger_ok(p_ledger uuid)
 returns uuid
 language plpgsql
 stable
 set search_path = controlai, public, pg_temp
 as $$
+declare v_senha text;
 begin
-  if p_ledger is null or not exists (select 1 from controlai.ledger where id = p_ledger) then
+  select senha_hash into v_senha from controlai.ledger where id = p_ledger;
+  if not found then
     raise exception 'Carteira não encontrada. Confira o link ou recupere seu ID pelo e-mail.';
   end if;
+  if v_senha is not null and not exists (
+       select 1 from controlai.ledger_sessao
+        where token_hash = controlai._sessao_atual() and ledger_id = p_ledger and expira_em > now()) then
+    raise exception 'Esta carteira tem senha.' using hint = 'controlai_senha';
+  end if;
   return p_ledger;
+end;
+$$;
+
+create or replace function controlai._nova_sessao(p_ledger uuid)
+returns text
+language plpgsql
+set search_path = controlai, public, pg_temp
+as $$
+declare v_token text := replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+begin
+  delete from controlai.ledger_sessao where expira_em <= now();
+  insert into controlai.ledger_sessao (token_hash, ledger_id)
+  values (encode(sha256(convert_to(v_token, 'UTF8')), 'hex'), p_ledger);
+  return v_token;
 end;
 $$;
 
@@ -436,7 +487,8 @@ begin
      where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim)
   select json_build_object(
     'ledger', (select json_build_object('id', l.id, 'name', l.name, 'email', l.email,
-                                        'currency', l.currency, 'created_at', l.created_at)
+                                        'currency', l.currency, 'created_at', l.created_at,
+                                        'tem_senha', l.senha_hash is not null)
                  from controlai.ledger l where l.id = v_ledger),
     'mes', to_char(v_ini, 'YYYY-MM'),
     'categories', coalesce((
@@ -527,7 +579,8 @@ begin
     select json_agg(json_build_object(
              'id', l.id, 'name', l.name,
              'created_at', l.created_at, 'last_seen_at', l.last_seen_at,
-             'despesas', (select count(*) from controlai.expense e where e.ledger_id = l.id))
+             'despesas', (select count(*) from controlai.expense e where e.ledger_id = l.id),
+             'tem_senha', l.senha_hash is not null)
            order by l.last_seen_at desc)
       from controlai.ledger l
      where l.email = v_email
@@ -922,6 +975,96 @@ begin
 end;
 $$;
 
+-- Senha ----------------------------------------------------------------------
+-- Entrar não levanta exceção na senha errada: a exceção desfaria a contagem de
+-- tentativas. 5 erros seguidos bloqueiam a carteira por 15 minutos.
+create or replace function public.controlai_entrar(p_ledger uuid, p_senha text)
+returns json
+language plpgsql
+security definer
+set search_path = controlai, public, extensions, pg_temp
+as $$
+declare l controlai.ledger;
+begin
+  select * into l from controlai.ledger where id = p_ledger for update;
+  if not found then
+    raise exception 'Carteira não encontrada. Confira o link ou recupere seu ID pelo e-mail.';
+  end if;
+  if l.senha_hash is null then
+    return json_build_object('token', null);
+  end if;
+  if l.senha_bloqueio_ate > now() then
+    return json_build_object('erro', format('Muitas tentativas erradas. Tente de novo em %s min.',
+                             ceil(extract(epoch from l.senha_bloqueio_ate - now()) / 60)));
+  end if;
+  if crypt(coalesce(p_senha, ''), l.senha_hash) <> l.senha_hash then
+    update controlai.ledger
+       set senha_falhas = case when senha_falhas + 1 >= 5 then 0 else senha_falhas + 1 end,
+           senha_bloqueio_ate = case when senha_falhas + 1 >= 5 then now() + interval '15 minutes' end
+     where id = p_ledger;
+    return json_build_object('erro', 'Senha incorreta.');
+  end if;
+  update controlai.ledger set senha_falhas = 0, senha_bloqueio_ate = null where id = p_ledger;
+  return json_build_object('token', controlai._nova_sessao(p_ledger));
+end;
+$$;
+
+-- Define, troca (p_senha) ou remove (null/vazio). Derruba as sessões de todos
+-- os aparelhos e devolve uma nova para quem trocou, que continua dentro.
+create or replace function public.controlai_set_senha(p_ledger uuid, p_senha text)
+returns text
+language plpgsql
+security definer
+set search_path = controlai, public, extensions, pg_temp
+as $$
+declare v text := nullif(p_senha, '');
+begin
+  perform controlai._ledger_ok(p_ledger);
+  if v is not null and (length(v) < 6 or octet_length(v) > 72) then
+    raise exception 'A senha precisa ter de 6 a 72 caracteres.';
+  end if;
+  update controlai.ledger
+     set senha_hash = case when v is null then null else crypt(v, gen_salt('bf', 10)) end,
+         senha_falhas = 0, senha_bloqueio_ate = null
+   where id = p_ledger;
+  delete from controlai.ledger_sessao where ledger_id = p_ledger;
+  return case when v is null then null else controlai._nova_sessao(p_ledger) end;
+end;
+$$;
+
+create or replace function public.controlai_sair(p_ledger uuid)
+returns void
+language sql
+security definer
+set search_path = controlai, public, pg_temp
+as $$
+  delete from controlai.ledger_sessao
+   where ledger_id = p_ledger and token_hash = controlai._sessao_atual();
+$$;
+
+-- Esqueceu a senha: quem provou ser dono do e-mail de recuperação ATUAL (não o
+-- histórico de ledger_email: um e-mail antigo pode ser de quem a senha quer
+-- barrar) remove a senha e abre a carteira pelo link.
+create or replace function public.controlai_remover_senha_pelo_email(p_ledger uuid)
+returns void
+language plpgsql
+security definer
+set search_path = controlai, public, pg_temp
+as $$
+declare v_email text := lower(btrim(coalesce(auth.jwt() ->> 'email', '')));
+begin
+  if v_email = '' then
+    raise exception 'Confirme o e-mail para remover a senha.';
+  end if;
+  update controlai.ledger set senha_hash = null, senha_falhas = 0, senha_bloqueio_ate = null
+   where id = p_ledger and email = v_email;
+  if not found then
+    raise exception 'Só o e-mail de recuperação atual desta carteira pode remover a senha.';
+  end if;
+  delete from controlai.ledger_sessao where ledger_id = p_ledger;
+end;
+$$;
+
 -- ----------------------------------------------------------------------------
 -- Permissões: anon/authenticated só podem EXECUTAR as funções acima.
 -- ----------------------------------------------------------------------------
@@ -963,7 +1106,11 @@ grant execute on function
   public.controlai_set_email(uuid, text),
   public.controlai_exportar(uuid),
   public.controlai_rotacionar_id(uuid),
-  public.controlai_apagar(uuid, uuid)
+  public.controlai_apagar(uuid, uuid),
+  public.controlai_entrar(uuid, text),
+  public.controlai_set_senha(uuid, text),
+  public.controlai_sair(uuid),
+  public.controlai_remover_senha_pelo_email(uuid)
 to anon, authenticated;
 
 -- As funções internas do schema controlai não são chamáveis de fora.
@@ -972,6 +1119,8 @@ revoke all on function controlai._hoje()                  from anon, authenticat
 revoke all on function controlai._mes_atual()             from anon, authenticated, public;
 revoke all on function controlai._mes_inicio(text)        from anon, authenticated, public;
 revoke all on function controlai._ledger_ok(uuid)         from anon, authenticated, public;
+revoke all on function controlai._sessao_atual()          from anon, authenticated, public;
+revoke all on function controlai._nova_sessao(uuid)       from anon, authenticated, public;
 revoke all on function controlai._total_mes(uuid, date)   from anon, authenticated, public;
 revoke all on function controlai._entrada(uuid)           from anon, authenticated, public;
 revoke all on function controlai._natureza_ok(text)       from anon, authenticated, public;

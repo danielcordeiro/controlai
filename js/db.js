@@ -61,11 +61,32 @@ function amigavel(error) {
   return error?.message || "Erro ao falar com o servidor.";
 }
 
-/** Executa uma RPC e devolve os dados, com erro amigável em caso de falha. */
+/** Sessão da carteira com senha neste aparelho (o servidor guarda só o hash). */
+export const sessao = {
+  get(id) {
+    try { return localStorage.getItem(`controlai:sessao:${id}`) || ""; } catch { return ""; }
+  },
+  set(id, token) {
+    try {
+      if (token) localStorage.setItem(`controlai:sessao:${id}`, token);
+      else localStorage.removeItem(`controlai:sessao:${id}`);
+    } catch { /* sem localStorage: pede a senha a cada abertura */ }
+  },
+};
+
+/** Executa uma RPC e devolve os dados, com erro amigável em caso de falha.
+ *  Leva a sessão da carteira (p_ledger) no cabeçalho; e.senha marca "pede senha". */
 async function rpc(fn, params) {
   if (!supabase) throw new Error("App não configurado (veja o config.js).");
-  const { data, error } = await supabase.rpc(fn, params);
-  if (error) throw new Error(amigavel(error));
+  const q = supabase.rpc(fn, params);
+  const token = params?.p_ledger && sessao.get(params.p_ledger);
+  if (token) q.setHeader("x-controlai-sessao", token);
+  const { data, error } = await q;
+  if (error) {
+    const e = new Error(amigavel(error));
+    e.senha = error.hint === "controlai_senha";
+    throw e;
+  }
   return data;
 }
 
@@ -92,7 +113,25 @@ export const db = {
   setEmail: (ledgerId, email) => rpc("controlai_set_email", { p_ledger: ledgerId, p_email: email }),
   exportar: (ledgerId) => rpc("controlai_exportar", { p_ledger: ledgerId }),
   /** Troca o UUID da carteira: a única forma de revogar um link que vazou. */
-  rotacionarId: (ledgerId) => rpc("controlai_rotacionar_id", { p_ledger: ledgerId }),
+  rotacionarId: async (ledgerId) => {
+    const novo = await rpc("controlai_rotacionar_id", { p_ledger: ledgerId });
+    sessao.set(novo, sessao.get(ledgerId));
+    sessao.set(ledgerId, null);
+    return novo;
+  },
+  /** Confere a senha; com ela certa, guarda a sessão deste aparelho. Devolve { token } ou { erro }. */
+  entrar: async (ledgerId, senha) => {
+    const r = await rpc("controlai_entrar", { p_ledger: ledgerId, p_senha: senha });
+    if (r?.token) sessao.set(ledgerId, r.token);
+    return r;
+  },
+  /** Define, troca ou (null) remove a senha. Os outros aparelhos perdem a sessão. */
+  setSenha: async (ledgerId, senha) => {
+    sessao.set(ledgerId, await rpc("controlai_set_senha", { p_ledger: ledgerId, p_senha: senha }));
+  },
+  sair: async (ledgerId) => {
+    try { await rpc("controlai_sair", { p_ledger: ledgerId }); } finally { sessao.set(ledgerId, null); }
+  },
   /** Token da API para IA (gerado na primeira leitura). Separado do link. */
   getApiToken: (ledgerId) => rpc("controlai_get_api_token", { p_ledger: ledgerId }),
   /** Gera um token novo e invalida o anterior (desconecta as IAs). */
@@ -246,6 +285,8 @@ export const auth = {
 
   /** Carteiras registradas no e-mail verificado da sessão. */
   meusIds: () => rpc("controlai_meus_ids", {}),
+  /** Esqueceu a senha: o dono do e-mail de recuperação atual remove a senha. */
+  removerSenha: (ledgerId) => rpc("controlai_remover_senha_pelo_email", { p_ledger: ledgerId }),
 
   async sair() {
     if (!supabase) return;
