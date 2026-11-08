@@ -855,5 +855,106 @@ begin
   raise notice '12. paridade, lancar e busca por nome: ok';
 end $$;
 
+-- 13. Receita, natureza e DRE ------------------------------------------------
+do $$
+declare
+  v_l     uuid := pg_temp.carteira();
+  v_t     text := public.controlai_get_api_token(v_l);
+  v_hoje  date := controlai._hoje();
+  v_atual text := controlai._mes_atual();
+  v_mor   uuid := pg_temp.cat(v_l, 'Moradia');
+  v_men uuid; v_sub uuid; v_imp uuid; v_inf uuid; v_tax uuid; v_emp uuid; v_inf_sub uuid;
+  j json; d json; x json;
+begin
+  v_men := public.controlai_add_categoria(v_l, 'Mensalidades', null, null, 'receita');
+  v_sub := public.controlai_add_categoria(v_l, 'Restaurantes', v_men, null, 'custo');
+  v_imp := public.controlai_add_categoria(v_l, 'Impostos', null, null, 'deducao');
+  v_inf := public.controlai_add_categoria(v_l, 'Infra', null, null, 'custo');
+  v_inf_sub := public.controlai_add_categoria(v_l, 'Servidores', v_inf);
+  v_tax := public.controlai_add_categoria(v_l, 'Taxas', null, null, 'financeira');
+  v_emp := public.controlai_add_categoria(v_l, 'Empréstimo sócio', null, null, 'entrada_fora');
+  perform pg_temp.ok((select natureza from controlai.category where id = v_sub) = 'receita',
+                     'subcategoria herda a natureza do pai, a informada é ignorada');
+  perform pg_temp.ok((select natureza from controlai.category where id = v_mor) = 'despesa',
+                     'categoria antiga fica despesa');
+  perform pg_temp.falha(format('select public.controlai_add_categoria(%L, ''X'', null, null, ''lucro'')', v_l),
+                        'Natureza inválida');
+
+  perform public.controlai_add_despesa(v_l, v_hoje, 10000, v_mor);
+  perform public.controlai_add_despesa(v_l, v_hoje, 100000, v_sub);
+  perform public.controlai_add_despesa(v_l, v_hoje, 6000, v_imp);
+  perform public.controlai_add_despesa(v_l, v_hoje, 20000, v_inf_sub);
+  perform public.controlai_add_despesa(v_l, v_hoje, 400, v_tax);
+  perform public.controlai_add_despesa(v_l, v_hoje, 50000, v_emp);
+
+  perform pg_temp.ok(controlai._total_mes(v_l, to_date(v_atual || '-01', 'YYYY-MM-DD')) = 36400,
+                     'total do mês soma só as saídas');
+  perform pg_temp.ok((select gasto_cents from controlai._orcamento(v_l, v_atual) where category_id is null) = 36400,
+                     'orçamento soma só as saídas');
+  j := public.controlai_mes(v_l, v_atual);
+  perform pg_temp.ok(json_array_length(j->'expenses') = 4 and json_array_length(j->'receitas') = 2,
+                     'snapshot separa saídas (expenses) e entradas (receitas)');
+  perform pg_temp.ok((j->>'total_cents')::bigint = 36400, 'snapshot: total_cents só das saídas');
+  d := j->'dre';
+  perform pg_temp.ok((d->>'receita')::bigint = 100000 and (d->>'deducao')::bigint = 6000
+                     and (d->>'receita_liquida')::bigint = 94000 and (d->>'custo')::bigint = 20000
+                     and (d->>'lucro_bruto')::bigint = 74000 and (d->>'despesa')::bigint = 10000
+                     and (d->>'financeira')::bigint = 400 and (d->>'resultado')::bigint = 63600
+                     and (d->>'entrada_fora')::bigint = 50000 and (d->>'saida_fora')::bigint = 0
+                     and (d->>'saldo')::bigint = 113600 and (d->>'a_receber')::bigint = 0,
+                     'DRE do mês por natureza, com subtotais e o fora do DRE só no saldo');
+  perform pg_temp.ok(j->'categories' -> 0 ->> 'natureza' is not null, 'snapshot devolve a natureza das categorias');
+
+  perform pg_temp.falha(format('select public.controlai_set_limite(%L, %L, 1000)', v_l, v_men), 'é de entrada');
+
+  -- reclassificar a principal leva as subcategorias e refaz o DRE
+  perform public.controlai_update_categoria(v_l, v_inf, 'Infra', null, null, 'despesa');
+  perform pg_temp.ok((select natureza from controlai.category where id = v_inf_sub) = 'despesa',
+                     'mudar a natureza da principal leva a subcategoria');
+  perform pg_temp.ok((controlai._dre(v_l, v_atual)->>'custo')::bigint = 0
+                     and (controlai._dre(v_l, v_atual)->>'despesa')::bigint = 30000, 'DRE refeito');
+  perform public.controlai_update_categoria(v_l, v_inf_sub, 'Servidores', null, null, 'receita');
+  perform pg_temp.ok((select natureza from controlai.category where id = v_inf_sub) = 'despesa',
+                     'natureza na subcategoria é ignorada');
+  perform pg_temp.falha(format('select public.controlai_update_categoria(%L, %L, ''Infra'', null, null, ''x'')', v_l, v_inf),
+                        'Natureza inválida');
+
+  -- mensalidade recorrente a confirmar: nasce a receber, fora do "a pagar"
+  perform public.controlai_add_fixa(v_l, 'Mensalidade Brasa', 25000, v_men,
+                                    extract(day from v_hoje)::integer, v_atual, null, null, true);
+  j := public.controlai_mes(v_l, v_atual);
+  perform pg_temp.ok((j->'dre'->>'a_receber')::bigint = 25000 and (j->'dre'->>'receita')::bigint = 125000,
+                     'mensalidade a confirmar entra na receita e no a receber');
+  perform pg_temp.ok(json_array_length(j->'pendentes') = 0, 'receita a receber não aparece no a pagar');
+  perform pg_temp.ok((j->>'total_cents')::bigint = 36400, 'fixa de receita não muda o total de saídas');
+
+  -- conector
+  perform pg_temp.falha(format('select public.controlai_api_lancar(%L, 10, ''Moradia'', p_tipo => ''receita'')', v_t),
+                        'é de saída');
+  perform pg_temp.falha(format('select public.controlai_api_lancar(%L, 10, ''Mensalidades'', p_tipo => ''despesa'')', v_t),
+                        'lancar_receita');
+  j := public.controlai_api_lancar(v_t, 300, 'Mensalidades', p_tipo => 'receita', p_descricao => 'Mensalidade Izu');
+  perform pg_temp.ok(j->>'natureza' = 'receita' and json_array_length(j->'limites') = 0,
+                     'api_lancar receita: natureza e nenhum limite');
+  x := public.controlai_api_resumo(v_t);
+  perform pg_temp.ok((x->>'total')::numeric = 364 and (x->>'lancamentos')::integer = 4
+                     and (x->'dre'->>'receita')::numeric = 1550 and (x->'dre'->>'resultado')::numeric = 1550 - 60 - 300 - 4
+                     and x->'receitas_por_categoria'->0->>'categoria' = 'Mensalidades'
+                     and json_array_length(x->'por_categoria') = 4,
+                     'api_resumo: total e categorias só de saídas; DRE em reais; receitas à parte');
+  x := public.controlai_api_contas_a_pagar(v_t);
+  perform pg_temp.ok((x->>'total_a_receber')::numeric = 250 and json_array_length(x->'a_receber') = 1
+                     and json_array_length(x->'vencem_este_mes') = 0 and json_array_length(x->'atrasadas') = 0,
+                     'contas_a_pagar: receita a receber à parte');
+  x := public.controlai_api_contexto(v_t);
+  perform pg_temp.ok((select e->>'natureza' from json_array_elements(x->'categorias') e
+                       where e->>'nome' = 'Mensalidades') = 'receita', 'contexto devolve a natureza');
+  j := public.controlai_api_criar_categoria(v_t, 'Pagar.me', null, 'financeira');
+  perform pg_temp.ok(j->>'natureza' = 'financeira', 'api_criar_categoria com natureza');
+  j := public.controlai_api_criar_categoria(v_t, 'Implantação', 'Mensalidades', 'custo');
+  perform pg_temp.ok(j->>'natureza' = 'receita', 'api_criar_categoria: subcategoria herda');
+  raise notice '13. receita, natureza e DRE: ok';
+end $$;
+
 select 'checks ok: ' || current_setting('checks.n') as resultado;
 rollback;

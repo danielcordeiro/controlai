@@ -43,6 +43,19 @@ A carteira abre em 4 abas:
   com subtotais. Sai pela impressão do navegador: escolha "Salvar como PDF".
 - **Maiores despesas** do mês.
 
+### 💰 Receitas e Resultado do mês (DRE)
+- No **＋**, escolha **Despesa** ou **Receita**: receita é um lançamento numa
+  categoria de entrada (Salário, Mensalidades...). Fixa, "a receber" (boleto
+  emitido e não pago) e forma de recebimento funcionam igual à despesa.
+- Cada categoria tem uma **natureza** (Ajustes do plano de contas): receita,
+  dedução (imposto sobre a receita), custo, despesa, despesa financeira, e
+  entrada/saída **fora do DRE** (empréstimo, aporte, transferência).
+- O total do mês, os limites e a projeção continuam somando só as **saídas**.
+- Card **Resultado do mês**: receita bruta, deduções, receita líquida, custos,
+  lucro bruto, despesas, financeiras e resultado, mais o que falta receber. Só
+  aparece quando a carteira usa alguma categoria que não é despesa. Também sai
+  no PDF, com as entradas por forma › categoria › lançamento.
+
 ### 🧾 Despesas
 - Lançamentos **agrupados por dia**, com o total de cada dia.
 - Selos `fixa`, `3/10` (a parcela), `a pagar` e `atrasada`.

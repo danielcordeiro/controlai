@@ -194,6 +194,7 @@ $$;
 
 -- As ocorrências de um mês no formato de uma despesa, sem id: o que a tela
 -- mostra como previsto. `p_so_a_pagar` recorta as que vão pedir confirmação.
+-- Só saídas: o "já comprometido" e o "a pagar" não contam receita prevista.
 create or replace function controlai._previstas(p_ledger uuid, p_mes text,
                                                  p_so_a_pagar boolean default false)
 returns json language sql stable set search_path = controlai, pg_temp as $$
@@ -205,7 +206,39 @@ returns json language sql stable set search_path = controlai, pg_temp as $$
            'parcela', o.parcela, 'parcelas', o.parcelas, 'prevista', true)
          order by o.vence, o.description), '[]'::json)
     from controlai._ocorrencias(p_ledger, p_mes, p_mes) o
-   where o.a_pagar or not p_so_a_pagar;
+   where (o.a_pagar or not p_so_a_pagar) and not controlai._entrada(o.category_id);
+$$;
+
+-- O DRE do mês em centavos, uma definição só: o app (controlai_mes) e a IA
+-- (api_resumo) leem daqui. Conta pelo mês da data do lançamento, pago ou não
+-- (como o total do mês); o que ainda falta receber vem à parte em a_receber.
+-- O que é fora do DRE (empréstimo, aporte, transferência) só entra no saldo.
+create or replace function controlai._dre(p_ledger uuid, p_mes text)
+returns json language sql stable set search_path = controlai, pg_temp as $$
+  with t as (
+    select coalesce(sum(e.amount_cents) filter (where c.natureza = 'receita'), 0)::bigint as receita,
+           coalesce(sum(e.amount_cents) filter (where c.natureza = 'deducao'), 0)::bigint as deducao,
+           coalesce(sum(e.amount_cents) filter (where c.natureza = 'custo'), 0)::bigint as custo,
+           coalesce(sum(e.amount_cents) filter (where c.natureza = 'despesa'), 0)::bigint as despesa,
+           coalesce(sum(e.amount_cents) filter (where c.natureza = 'financeira'), 0)::bigint as financeira,
+           coalesce(sum(e.amount_cents) filter (where c.natureza = 'entrada_fora'), 0)::bigint as entrada_fora,
+           coalesce(sum(e.amount_cents) filter (where c.natureza = 'saida_fora'), 0)::bigint as saida_fora,
+           coalesce(sum(e.amount_cents) filter (where c.natureza in ('receita', 'entrada_fora') and e.a_pagar), 0)::bigint
+             as a_receber
+      from controlai.expense e
+      join controlai.category c on c.id = e.category_id
+     where e.ledger_id = p_ledger
+       and e.spent_on >= to_date(p_mes || '-01', 'YYYY-MM-DD')
+       and e.spent_on < (to_date(p_mes || '-01', 'YYYY-MM-DD') + interval '1 month')::date)
+  select json_build_object(
+           'receita', receita, 'deducao', deducao, 'receita_liquida', receita - deducao,
+           'custo', custo, 'lucro_bruto', receita - deducao - custo,
+           'despesa', despesa, 'financeira', financeira,
+           'resultado', receita - deducao - custo - despesa - financeira,
+           'entrada_fora', entrada_fora, 'saida_fora', saida_fora,
+           'saldo', receita + entrada_fora - deducao - custo - despesa - financeira - saida_fora,
+           'a_receber', a_receber)
+    from t;
 $$;
 
 -- A ÚNICA definição do gasto contra o limite, do livre, da projeção e da média
@@ -240,11 +273,13 @@ language sql stable set search_path = controlai, pg_temp as $$
       left join controlai.category c on c.id = e.category_id
      where e.ledger_id = p_ledger
        and e.spent_on >= m.ini and e.spent_on < (m.ini + interval '1 month')::date
+       and not controlai._entrada(e.category_id)
     union all
     select coalesce(c.parent_id, o.category_id), o.amount_cents, false, true
       from controlai._ocorrencias(p_ledger, p_mes, p_mes) o
       left join controlai.category c on c.id = o.category_id
-     where p_mes > to_char(p_hoje, 'YYYY-MM')),
+     where p_mes > to_char(p_hoje, 'YYYY-MM')
+       and not controlai._entrada(o.category_id)),
   lim as (select * from controlai._limites(p_ledger, p_mes)),
   alvos as (
     select null::uuid as alvo, (select l.limite_cents from lim l where l.category_id is null) as limite
@@ -583,6 +618,7 @@ revoke all on function controlai._gerar_fixas(uuid, text)                   from
 revoke all on function controlai._andamento(controlai.recurring)            from anon, authenticated, public;
 revoke all on function controlai._previstas(uuid, text, boolean)            from anon, authenticated, public;
 revoke all on function controlai._orcamento(uuid, text, date)               from anon, authenticated, public;
+revoke all on function controlai._dre(uuid, text)                           from anon, authenticated, public;
 revoke all on function controlai._catchup_fixas(uuid, text)                 from anon, authenticated, public;
 revoke all on function controlai._solta_da_fixa(uuid)                       from anon, authenticated, public;
 

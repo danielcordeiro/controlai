@@ -6,6 +6,46 @@ import { fmtBRL } from "./ui.js";
 export const SEM_CATEGORIA = { id: null, name: "Sem categoria", color: "#9ca3af" };
 export const SEM_FORMA = { id: null, name: "Não informada" };
 
+/** Natureza da categoria (controlai.category.natureza): lado do caixa e linha do DRE. */
+export const NATUREZAS = [
+  { id: "despesa", rotulo: "Despesa", entrada: false },
+  { id: "receita", rotulo: "Receita", entrada: true },
+  { id: "deducao", rotulo: "Dedução (imposto sobre a receita)", entrada: false },
+  { id: "custo", rotulo: "Custo (do serviço/produto)", entrada: false },
+  { id: "financeira", rotulo: "Despesa financeira (taxas, juros)", entrada: false },
+  { id: "entrada_fora", rotulo: "Entrada fora do DRE (aporte, empréstimo)", entrada: true },
+  { id: "saida_fora", rotulo: "Saída fora do DRE (pagar empréstimo, transferência)", entrada: false },
+];
+
+/** A categoria é de entrada? Sem natureza (front novo, SQL antigo) é despesa. */
+export function ehEntrada(cat) {
+  return !!NATUREZAS.find((n) => n.id === (cat?.natureza || "despesa"))?.entrada;
+}
+
+/**
+ * Linhas do DRE para desenhar, a partir de controlai._dre (centavos; as contas
+ * são do servidor). A dedução e o custo só aparecem quando existem, e com eles
+ * o subtotal que abrem: carteira pessoal vê Receitas − Despesas = Resultado.
+ * O fora do DRE vem por último, só quando houver.
+ */
+export function linhasDRE(d) {
+  if (!d) return [];
+  const l = (rotulo, cents, tipo = "item") => ({ rotulo, cents, tipo });
+  return [
+    l("Receita bruta", d.receita),
+    d.deducao ? l("(−) Deduções", -d.deducao) : null,
+    d.deducao ? l("= Receita líquida", d.receita_liquida, "sub") : null,
+    d.custo ? l("(−) Custos", -d.custo) : null,
+    d.custo ? l("= Lucro bruto", d.lucro_bruto, "sub") : null,
+    l("(−) Despesas", -d.despesa),
+    d.financeira ? l("(−) Despesas financeiras", -d.financeira) : null,
+    l("= Resultado", d.resultado, "total"),
+    d.entrada_fora ? l("Entradas fora do DRE", d.entrada_fora, "fora") : null,
+    d.saida_fora ? l("Saídas fora do DRE", -d.saida_fora, "fora") : null,
+    d.entrada_fora || d.saida_fora ? l("= Saldo do caixa", d.saldo, "sub") : null,
+  ].filter(Boolean);
+}
+
 /** Soma simples das despesas, em centavos. */
 export function totalCentavos(despesas) {
   return (despesas || []).reduce((s, d) => s + (d.amount_cents || 0), 0);
@@ -270,7 +310,8 @@ export function montaCSV(despesas, categorias, formas) {
     const s = String(v ?? "");
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const linhas = [["Data", "Descrição", "Categoria", "Forma de pagamento", "Valor"].join(";")];
+  const tipo = (id) => (ehEntrada(cat.get(id)) ? "Entrada" : "Saída");
+  const linhas = [["Data", "Descrição", "Categoria", "Forma de pagamento", "Valor", "Tipo"].join(";")];
   for (const d of [...(despesas || [])].sort((a, b) => (a.spent_on < b.spent_on ? -1 : 1))) {
     linhas.push([
       esc(d.spent_on),
@@ -278,6 +319,7 @@ export function montaCSV(despesas, categorias, formas) {
       esc(nomeCat(d.category_id)),
       esc(d.payment_method_id ? (forma.get(d.payment_method_id)?.name || "") : ""),
       esc(((d.amount_cents || 0) / 100).toFixed(2).replace(".", ",")),
+      tipo(d.category_id),
     ].join(";"));
   }
   return linhas.join("\n");

@@ -173,7 +173,7 @@ grupo("variacaoPct", () => {
 // ---------------------------------------------------------------- agregação do mês
 const {
   porCategoria, porFormaPagamento, porDia, totalCentavos, maioresDespesas, montaCSV,
-  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal, arvoreFormas,
+  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal, arvoreFormas, linhasDRE, ehEntrada,
 } = await import("../js/report.js");
 
 const CATS = [
@@ -270,11 +270,30 @@ grupo("arvoreFormas (forma › categoria › lançamentos)", () => {
   eq(ordem, "a,c,b", "lançamentos por data; no mesmo dia, o maior primeiro");
 });
 
+grupo("linhasDRE e ehEntrada", () => {
+  const zero = { receita: 0, deducao: 0, receita_liquida: 0, custo: 0, lucro_bruto: 0, despesa: 0,
+    financeira: 0, resultado: 0, entrada_fora: 0, saida_fora: 0, saldo: 0, a_receber: 0 };
+  const pessoal = linhasDRE({ ...zero, receita: 500000, despesa: 320000, resultado: 180000, saldo: 180000 });
+  eq(pessoal.map((l) => l.rotulo).join("|"), "Receita bruta|(−) Despesas|= Resultado",
+    "carteira pessoal: receita, despesas, resultado; sem subtotais vazios");
+  eq(pessoal[1].cents, -320000, "saída aparece negativa");
+  const empresa = linhasDRE({ ...zero, receita: 100000, deducao: 6000, receita_liquida: 94000, custo: 20000,
+    lucro_bruto: 74000, despesa: 10000, financeira: 400, resultado: 63600, entrada_fora: 50000, saldo: 113600 });
+  eq(empresa.map((l) => l.rotulo).join("|"),
+    "Receita bruta|(−) Deduções|= Receita líquida|(−) Custos|= Lucro bruto|(−) Despesas|(−) Despesas financeiras"
+    + "|= Resultado|Entradas fora do DRE|= Saldo do caixa", "empresa: DRE completo e o fora do DRE no fim");
+  eq(empresa.find((l) => l.tipo === "total").cents, 63600, "resultado vem do servidor, sem conta no front");
+  eq(linhasDRE(null).length, 0, "sem DRE (SQL antigo), nada");
+  ok(ehEntrada({ natureza: "receita" }) && ehEntrada({ natureza: "entrada_fora" }), "receita e entrada fora são entradas");
+  ok(!ehEntrada({ natureza: "custo" }) && !ehEntrada({}) && !ehEntrada(null), "o resto (e sem natureza) é saída");
+});
+
 grupo("montaCSV", () => {
   const csv = montaCSV(DESP, CATS, FORMAS);
   const linhas = csv.split("\n");
   eq(linhas.length, DESP.length + 1, "cabeçalho + uma linha por despesa");
-  eq(linhas[0], "Data;Descrição;Categoria;Forma de pagamento;Valor", "cabeçalho");
+  eq(linhas[0], "Data;Descrição;Categoria;Forma de pagamento;Valor;Tipo", "cabeçalho");
+  ok(linhas[1].endsWith(";Saída"), "despesa sai como Saída");
   ok(linhas[1].startsWith("2026-09-01"), "ordenado da data mais antiga");
   ok(csv.includes("Alimentação > Mercado"), "subcategoria sai com o pai");
   ok(csv.includes("200,00"), "valor em vírgula decimal (pt-BR)");
@@ -479,6 +498,7 @@ grupo("xlsx — planilha das despesas", () => {
   const sheet = z["xl/worksheets/sheet1.xml"];
   ok(sheet.includes("<t>Data</t>"), "cabeçalho Data");
   ok(sheet.includes("<t>Subcategoria</t>"), "coluna de subcategoria");
+  ok(sheet.includes("<t>Tipo</t>") && sheet.includes(">Saída</t>"), "coluna Tipo (entrada/saída)");
   ok(sheet.includes("state=\"frozen\""), "cabeçalho congelado");
   ok(sheet.includes("<autoFilter"), "filtro automático");
   // valor entra como NÚMERO (dá para somar), não como texto

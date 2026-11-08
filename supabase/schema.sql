@@ -70,6 +70,14 @@ create index if not exists category_parent_idx on controlai.category (parent_id)
 create unique index if not exists category_nome_unq
   on controlai.category (ledger_id, coalesce(parent_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(name));
 
+-- Natureza da categoria: diz se o lançamento é entrada ou saída e em que linha
+-- do DRE ele cai. 'despesa' é o padrão (a carteira pessoal nem precisa ver o
+-- resto). A subcategoria herda a do pai e a grava também, para filtrar sem join.
+alter table controlai.category add column if not exists natureza text not null default 'despesa';
+alter table controlai.category drop constraint if exists category_natureza_ok;
+alter table controlai.category add constraint category_natureza_ok check (natureza in
+  ('receita', 'entrada_fora', 'deducao', 'custo', 'despesa', 'financeira', 'saida_fora'));
+
 -- Limite de gasto do mês: o total ou uma categoria de 1º nível. Vigência
 -- mensal: a linha vale de mes_inicio em diante, até a próxima do mesmo alvo, e
 -- cada mês passado guarda o limite que tinha (ver controlai._limites). A
@@ -205,7 +213,26 @@ begin
 end;
 $$;
 
--- Total de um mês da carteira (usado na comparação com o mês anterior).
+-- Entrada (receita ou entrada fora do DRE) ou saída? O gasto do mês, os
+-- limites, a projeção e o "a pagar" somam só as saídas; a entrada vai para o DRE.
+create or replace function controlai._entrada(p_category uuid)
+returns boolean language sql stable set search_path = controlai, pg_temp as $$
+  select coalesce((select c.natureza in ('receita', 'entrada_fora')
+                     from controlai.category c where c.id = p_category), false);
+$$;
+
+-- Nome de natureza válido, com erro legível (a constraint daria erro cru).
+create or replace function controlai._natureza_ok(p text)
+returns text language plpgsql immutable set search_path = pg_temp as $$
+begin
+  if p is null or p not in ('receita', 'entrada_fora', 'deducao', 'custo', 'despesa', 'financeira', 'saida_fora') then
+    raise exception 'Natureza inválida: %. Use receita, entrada_fora, deducao, custo, despesa, financeira ou saida_fora.', p;
+  end if;
+  return p;
+end;
+$$;
+
+-- Total de SAÍDAS de um mês da carteira (o "gastei"; comparação com o anterior).
 create or replace function controlai._total_mes(p_ledger uuid, p_inicio date)
 returns bigint
 language sql
@@ -216,7 +243,8 @@ as $$
     from controlai.expense
    where ledger_id = p_ledger
      and spent_on >= p_inicio
-     and spent_on <  (p_inicio + interval '1 month')::date;
+     and spent_on <  (p_inicio + interval '1 month')::date
+     and not controlai._entrada(category_id);
 $$;
 
 -- Os limites vigentes num mês: por alvo, a linha de maior mes_inicio <= mês.
@@ -391,6 +419,21 @@ begin
   -- abrir o app é o gatilho que materializa as ocorrências das fixas (fixas.sql)
   perform controlai._catchup_fixas(v_ledger);
 
+  -- as linhas do mês uma vez só: 'expenses' são as saídas (o app antigo lê só
+  -- esta chave e continua certo) e 'receitas' as entradas
+  with linhas as (
+    select controlai._entrada(e.category_id) as entrada, e.spent_on, e.created_at,
+           json_build_object('id', e.id, 'spent_on', to_char(e.spent_on, 'YYYY-MM-DD'),
+                             'amount_cents', e.amount_cents, 'category_id', e.category_id,
+                             'payment_method_id', e.payment_method_id,
+                             'description', e.description,
+                             'recurring_id', e.recurring_id,
+                             'a_pagar', e.a_pagar, 'recurring_month', e.recurring_month,
+                             'parcela', controlai._parcela(r, e.recurring_month),
+                             'parcelas', r.total_meses) as j
+      from controlai.expense e
+      left join controlai.recurring r on r.id = e.recurring_id
+     where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim)
   select json_build_object(
     'ledger', (select json_build_object('id', l.id, 'name', l.name, 'email', l.email,
                                         'currency', l.currency, 'created_at', l.created_at)
@@ -399,7 +442,7 @@ begin
     'categories', coalesce((
         select json_agg(json_build_object('id', c.id, 'name', c.name, 'color', c.color,
                                           'parent_id', c.parent_id, 'archived', c.archived,
-                                          'sort_order', c.sort_order)
+                                          'sort_order', c.sort_order, 'natureza', c.natureza)
                         order by c.sort_order, lower(c.name))
           from controlai.category c where c.ledger_id = v_ledger), '[]'::json),
     'payment_methods', coalesce((
@@ -408,18 +451,12 @@ begin
                         order by m.sort_order, lower(m.name))
           from controlai.payment_method m where m.ledger_id = v_ledger), '[]'::json),
     'expenses', coalesce((
-        select json_agg(json_build_object('id', e.id, 'spent_on', to_char(e.spent_on, 'YYYY-MM-DD'),
-                                          'amount_cents', e.amount_cents, 'category_id', e.category_id,
-                                          'payment_method_id', e.payment_method_id,
-                                          'description', e.description,
-                                          'recurring_id', e.recurring_id,
-                                          'a_pagar', e.a_pagar, 'recurring_month', e.recurring_month,
-                                          'parcela', controlai._parcela(r, e.recurring_month),
-                                          'parcelas', r.total_meses)
-                        order by e.spent_on desc, e.created_at desc)
-          from controlai.expense e
-          left join controlai.recurring r on r.id = e.recurring_id
-         where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim), '[]'::json),
+        select json_agg(x.j order by x.spent_on desc, x.created_at desc)
+          from linhas x where not x.entrada), '[]'::json),
+    'receitas', coalesce((
+        select json_agg(x.j order by x.spent_on desc, x.created_at desc)
+          from linhas x where x.entrada), '[]'::json),
+    'dre', controlai._dre(v_ledger, to_char(v_ini, 'YYYY-MM')),
     'fixas', coalesce((
         select json_agg(json_build_object(
                  'id', r.id, 'description', r.description, 'amount_cents', r.amount_cents,
@@ -450,7 +487,7 @@ begin
                                           'parcelas', r.total_meses)
                         order by p.spent_on, p.created_at)
           from (select * from controlai.expense e
-                 where e.ledger_id = v_ledger and e.a_pagar
+                 where e.ledger_id = v_ledger and e.a_pagar and not controlai._entrada(e.category_id)
                  order by e.spent_on, e.created_at limit 200) p
           left join controlai.recurring r on r.id = p.recurring_id), '[]'::json),
     'proximas', controlai._previstas(v_ledger, controlai._mes_add(controlai._mes_atual(), 1), true),
@@ -461,7 +498,8 @@ begin
     'meses_com_gasto', coalesce((
         select json_agg(m order by m desc)
           from (select distinct to_char(e.spent_on, 'YYYY-MM') m
-                  from controlai.expense e where e.ledger_id = v_ledger) t), '[]'::json)
+                  from controlai.expense e
+                 where e.ledger_id = v_ledger and not controlai._entrada(e.category_id)) t), '[]'::json)
   ) into v_out;
 
   return v_out;
@@ -594,8 +632,14 @@ end;
 $$;
 
 -- Categorias (plano de contas) -----------------------------------------------
+-- As assinaturas ganharam p_natureza: sem o drop, o create viraria sobrecarga.
+drop function if exists public.controlai_add_categoria(uuid, text, uuid, text);
+drop function if exists public.controlai_update_categoria(uuid, uuid, text, text, boolean);
+
+-- Subcategoria herda a natureza do pai (a informada é ignorada).
 create or replace function public.controlai_add_categoria(
-  p_ledger uuid, p_name text, p_parent uuid default null, p_color text default '#6366f1')
+  p_ledger uuid, p_name text, p_parent uuid default null, p_color text default '#6366f1',
+  p_natureza text default null)
 returns uuid
 language plpgsql
 security definer
@@ -620,8 +664,10 @@ begin
     end if;
   end if;
 
-  insert into controlai.category (ledger_id, parent_id, name, color)
-  values (v_ledger, p_parent, left(v_nome, 40), coalesce(nullif(btrim(p_color), ''), '#6366f1'))
+  insert into controlai.category (ledger_id, parent_id, name, color, natureza)
+  values (v_ledger, p_parent, left(v_nome, 40), coalesce(nullif(btrim(p_color), ''), '#6366f1'),
+          coalesce((select c.natureza from controlai.category c where c.id = p_parent),
+                   controlai._natureza_ok(coalesce(p_natureza, 'despesa'))))
   returning id into v_id;
 
   return v_id;
@@ -630,8 +676,11 @@ exception when unique_violation then
 end;
 $$;
 
+-- Mudar a natureza só na categoria principal, e ela leva as subcategorias e o
+-- histórico junto (reclassificar um mês passado é o ponto: o DRE se refaz).
 create or replace function public.controlai_update_categoria(
-  p_ledger uuid, p_category uuid, p_name text, p_color text default null, p_archived boolean default null)
+  p_ledger uuid, p_category uuid, p_name text, p_color text default null, p_archived boolean default null,
+  p_natureza text default null)
 returns void
 language plpgsql
 security definer
@@ -650,6 +699,12 @@ begin
          color = coalesce(nullif(btrim(p_color), ''), color),
          archived = coalesce(p_archived, archived)
    where id = p_category and ledger_id = v_ledger;
+  if p_natureza is not null
+     and exists (select 1 from controlai.category where id = p_category and parent_id is null) then
+    update controlai.category
+       set natureza = controlai._natureza_ok(p_natureza)
+     where ledger_id = v_ledger and (id = p_category or parent_id = p_category);
+  end if;
 exception when unique_violation then
   raise exception 'Já existe uma categoria com esse nome aqui.';
 end;
@@ -698,6 +753,9 @@ begin
     perform controlai._pertence(v_ledger, 'category', p_category);
     if exists (select 1 from controlai.category where id = p_category and parent_id is not null) then
       raise exception 'Limite vale para a categoria principal (as subcategorias somam nela).';
+    end if;
+    if controlai._entrada(p_category) then
+      raise exception 'Limite é para saídas; esta categoria é de entrada.';
     end if;
   end if;
   if p_limite_cents <= 0 then
@@ -894,8 +952,8 @@ grant execute on function
   public.controlai_add_despesa(uuid, date, integer, uuid, uuid, text),
   public.controlai_update_despesa(uuid, uuid, date, integer, uuid, uuid, text),
   public.controlai_del_despesa(uuid, uuid),
-  public.controlai_add_categoria(uuid, text, uuid, text),
-  public.controlai_update_categoria(uuid, uuid, text, text, boolean),
+  public.controlai_add_categoria(uuid, text, uuid, text, text),
+  public.controlai_update_categoria(uuid, uuid, text, text, boolean, text),
   public.controlai_del_categoria(uuid, uuid),
   public.controlai_set_limite(uuid, uuid, integer),
   public.controlai_add_forma(uuid, text),
@@ -915,6 +973,8 @@ revoke all on function controlai._mes_atual()             from anon, authenticat
 revoke all on function controlai._mes_inicio(text)        from anon, authenticated, public;
 revoke all on function controlai._ledger_ok(uuid)         from anon, authenticated, public;
 revoke all on function controlai._total_mes(uuid, date)   from anon, authenticated, public;
+revoke all on function controlai._entrada(uuid)           from anon, authenticated, public;
+revoke all on function controlai._natureza_ok(text)       from anon, authenticated, public;
 revoke all on function controlai._limites(uuid, text)     from anon, authenticated, public;
 revoke all on function controlai._pertence(uuid, text, uuid) from anon, authenticated, public;
 revoke all on function controlai._data_ok(date, date, boolean) from anon, authenticated, public;

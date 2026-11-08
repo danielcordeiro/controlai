@@ -291,6 +291,19 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
 .tag--apagar { background: #fef3c7; color: #92400e; }
 .tag--atrasada { background: #fee2e2; color: var(--neg); }
 .tag--previsto { background: #eef0f3; color: var(--muted); }
+.tag--receita { background: #dcfce7; color: var(--pos); }
+.exp__amount--entrada { color: var(--pos); }
+
+/* ---- resultado do mês (DRE) ---- */
+.dre { padding: 10px 16px; }
+.dre__linha { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px; }
+.dre__linha b { white-space: nowrap; font-weight: 600; }
+.dre__linha--sub { border-top: 1px dashed var(--line); font-weight: 700; }
+.dre__linha--total { border-top: 2px solid var(--ink); font-weight: 800; font-size: 15px; margin-top: 2px; }
+.dre__linha--total b { font-weight: 800; }
+.dre__linha--total .pos { color: var(--pos); }
+.dre__linha--total .neg { color: var(--neg); }
+.dre__linha--fora { color: var(--muted); margin-top: 6px; }
 
 /* prévia do parcelado no formulário */
 .previa { font-size: 14px; font-weight: 700; color: var(--brand-dark); margin-top: 8px; min-height: 1.2em; }
@@ -396,4 +409,10 @@ textarea.input { resize: vertical; min-height: 68px; font-size: 15px; }
   .relatorio th:last-child, .relatorio td:last-child { text-align: right; white-space: nowrap; padding-left: 10px; }
   .relatorio tr { break-inside: avoid; }
   .relatorio__det { color: #666; font-size: 9pt; }
+  .relatorio__bloco { font-size: 14pt; font-weight: 800; text-transform: uppercase; letter-spacing: .5px; margin: 22px 0 0; break-after: avoid; }
+  .relatorio__dre { margin-top: 6px; }
+  .relatorio__dre td:first-child { width: auto; color: inherit; }
+  .relatorio__dre--sub td, .relatorio__dre--total td { font-weight: 700; border-top: 1px solid #999; }
+  .relatorio__dre--total td { border-top: 2px solid #000; }
+  .relatorio__dre--fora td { color: #555; }
 }

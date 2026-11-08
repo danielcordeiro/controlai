@@ -152,6 +152,7 @@ begin
     'categorias', coalesce((
       select json_agg(json_build_object(
                'nome', c.name,
+               'natureza', c.natureza,
                'subcategorias', coalesce((select json_agg(f.name order by f.name)
                                             from controlai.category f
                                            where f.parent_id = c.id and not f.archived), '[]'::json))
@@ -168,9 +169,13 @@ $$;
 -- 'limites': como ficaram o total e a categoria-topo lançada no mês da data,
 -- só os que têm limite vigente. O catch-up vem antes: sem as fixas do mês já
 -- gravadas, o livre sairia maior do que é.
+-- p_tipo ('despesa' ou 'receita') confere que a categoria é daquele lado: sem
+-- ele, "recebi 500 de Mercado" viraria uma despesa calada. Nulo aceita qualquer.
+drop function if exists public.controlai_api_lancar(text, numeric, text, text, text, text);
 create or replace function public.controlai_api_lancar(
   p_token text, p_valor numeric, p_categoria text,
-  p_data text default null, p_forma text default null, p_descricao text default null)
+  p_data text default null, p_forma text default null, p_descricao text default null,
+  p_tipo text default null)
 returns json language plpgsql security definer set search_path = controlai, public, pg_temp as $$
 declare v_ledger uuid; v_cat uuid; v_forma uuid; v_data date; v_cents integer; v_id uuid;
 begin
@@ -186,6 +191,11 @@ begin
   end if;
   v_cents := round(p_valor * 100)::integer;
   v_cat   := controlai._categoria_por_nome(v_ledger, p_categoria);
+  if p_tipo = 'receita' and not controlai._entrada(v_cat) then
+    raise exception 'A categoria "%" é de saída, não de receita. Veja a natureza das categorias em contexto.', p_categoria;
+  elsif p_tipo = 'despesa' and controlai._entrada(v_cat) then
+    raise exception 'A categoria "%" é de entrada (receita). Para receita use lancar_receita.', p_categoria;
+  end if;
   v_forma := controlai._forma_por_nome(v_ledger, p_forma);
   v_data  := coalesce(nullif(btrim(coalesce(p_data, '')), '')::date,
                       controlai._hoje());
@@ -198,6 +208,7 @@ begin
     'data', to_char(v_data, 'YYYY-MM-DD'),
     'valor', round(v_cents / 100.0, 2),
     'categoria', (select name from controlai.category where id = v_cat),
+    'natureza', (select natureza from controlai.category where id = v_cat),
     'forma_pagamento', (select name from controlai.payment_method where id = v_forma),
     'descricao', left(coalesce(btrim(p_descricao), ''), 140),
     'limites', coalesce((
@@ -236,11 +247,12 @@ begin
     v_ant := controlai._total_mes(v_ledger, (v_ini - interval '1 month')::date);
   end if;
   select coalesce(sum(e.amount_cents), 0) into v_a_pagar from controlai.expense e
-   where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim and e.a_pagar;
+   where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim and e.a_pagar
+     and not controlai._entrada(e.category_id);
   select coalesce(sum(o.amount_cents), 0), coalesce(sum(o.amount_cents) filter (where o.a_pagar), 0)
     into v_comp, v_comp_conf
     from controlai._ocorrencias(v_ledger, v_mes, v_mes) o
-   where v_mes > controlai._mes_atual();
+   where v_mes > controlai._mes_atual() and not controlai._entrada(o.category_id);
   return json_build_object(
     'mes', v_mes,
     'total', round(v_total / 100.0, 2),
@@ -251,7 +263,11 @@ begin
     'total_mes_anterior', round(v_ant / 100.0, 2),
     'variacao_pct', case when v_ant > 0 then round(((v_total - v_ant) * 100.0) / v_ant, 1) else null end,
     'lancamentos', (select count(*) from controlai.expense e
-                     where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim),
+                     where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim
+                       and not controlai._entrada(e.category_id)),
+    -- 'total' e o resto acima são saídas; o DRE (com as receitas) vem em reais
+    'dre', (select json_object_agg(k, round(v::numeric / 100, 2))
+              from json_each_text(controlai._dre(v_ledger, v_mes)) x(k, v)),
     'por_categoria', coalesce((
       select json_agg(json_build_object('categoria', nome, 'valor', round(cents / 100.0, 2),
                                         'pct', case when v_total > 0 then round((cents * 100.0) / v_total, 1) else 0 end)
@@ -261,6 +277,16 @@ begin
                 left join controlai.category c on c.id = e.category_id
                 left join controlai.category p on p.id = c.parent_id
                where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim
+                 and not controlai._entrada(e.category_id)
+               group by 1) t), '[]'::json),
+    'receitas_por_categoria', coalesce((
+      select json_agg(json_build_object('categoria', nome, 'valor', round(cents / 100.0, 2)) order by cents desc)
+        from (select coalesce(p.name, c.name) as nome, sum(e.amount_cents) as cents
+                from controlai.expense e
+                join controlai.category c on c.id = e.category_id
+                left join controlai.category p on p.id = c.parent_id
+               where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim
+                 and controlai._entrada(e.category_id)
                group by 1) t), '[]'::json),
     'por_forma_pagamento', coalesce((
       select json_agg(json_build_object('forma', nome, 'valor', round(cents / 100.0, 2)) order by cents desc)
@@ -268,6 +294,7 @@ begin
                 from controlai.expense e
                 left join controlai.payment_method m on m.id = e.payment_method_id
                where e.ledger_id = v_ledger and e.spent_on >= v_ini and e.spent_on < v_fim
+                 and not controlai._entrada(e.category_id)
                group by 1) t), '[]'::json),
     'orcamento', (
       with o as (select * from controlai._orcamento(v_ledger, v_mes))
@@ -363,12 +390,12 @@ begin
     select json_agg(json_build_object(
              'id', i.id, 'data', to_char(i.dia, 'YYYY-MM-DD'),
              'valor', round(i.cents / 100.0, 2),
-             'categoria', i.categoria, 'forma_pagamento', i.forma,
+             'categoria', i.categoria, 'natureza', i.natureza, 'forma_pagamento', i.forma,
              'descricao', nullif(i.descricao, ''),
              'de_fixa', i.rec is not null, 'a_pagar', i.a_pagar,
              'parcela', i.parcela || '/' || i.parcelas, 'prevista', i.id is null)
            order by i.dia desc, i.criado desc)
-      from (select u.*, c.name as categoria, m.name as forma
+      from (select u.*, c.name as categoria, c.natureza, m.name as forma
               from (select e.id, e.spent_on as dia, e.amount_cents as cents, e.category_id as cat,
                            e.payment_method_id as forma_id, e.description as descricao,
                            e.recurring_id as rec, e.a_pagar,
@@ -444,8 +471,10 @@ begin
 end;
 $$;
 
+drop function if exists public.controlai_api_criar_categoria(text, text, text);
+-- p_natureza só vale na principal; a subcategoria herda a do pai.
 create or replace function public.controlai_api_criar_categoria(
-  p_token text, p_nome text, p_pai text default null)
+  p_token text, p_nome text, p_pai text default null, p_natureza text default null)
 returns json language plpgsql security definer set search_path = controlai, public, pg_temp as $$
 declare v_ledger uuid; v_pai uuid; v_id uuid; v_nome text; v_qtd integer;
 begin
@@ -460,10 +489,13 @@ begin
   end if;
   select count(*) into v_qtd from controlai.category where ledger_id = v_ledger;
   if v_qtd >= 100 then raise exception 'Limite de categorias atingido.'; end if;
-  insert into controlai.category (ledger_id, parent_id, name, color)
-  values (v_ledger, v_pai, left(v_nome, 40), '#6366f1')
+  insert into controlai.category (ledger_id, parent_id, name, color, natureza)
+  values (v_ledger, v_pai, left(v_nome, 40), '#6366f1',
+          coalesce((select c.natureza from controlai.category c where c.id = v_pai),
+                   controlai._natureza_ok(coalesce(nullif(btrim(p_natureza), ''), 'despesa'))))
   returning id into v_id;
-  return json_build_object('ok', true, 'id', v_id, 'nome', left(v_nome, 40));
+  return json_build_object('ok', true, 'id', v_id, 'nome', left(v_nome, 40),
+                           'natureza', (select natureza from controlai.category where id = v_id));
 exception when unique_violation then
   raise exception 'Já existe uma categoria com esse nome aqui.';
 end;
@@ -676,7 +708,13 @@ begin
         from controlai.expense e
         left join controlai.category c on c.id = e.category_id
         left join controlai.recurring r on r.id = e.recurring_id
-       where e.ledger_id = v_ledger and e.a_pagar)
+       where e.ledger_id = v_ledger and e.a_pagar and not controlai._entrada(e.category_id)),
+    rec as (
+      select e.id, nullif(e.description, '') as descricao, c.name as categoria,
+             e.spent_on, e.amount_cents, e.spent_on < v_hoje as atrasada
+        from controlai.expense e
+        join controlai.category c on c.id = e.category_id
+       where e.ledger_id = v_ledger and e.a_pagar and controlai._entrada(e.category_id))
     select json_build_object(
       'hoje', to_char(v_hoje, 'YYYY-MM-DD'),
       'total_atrasado', (select round(coalesce(sum(amount_cents), 0) / 100.0, 2) from p where atrasada),
@@ -699,7 +737,16 @@ begin
                                           'valor', round(o.amount_cents / 100.0, 2),
                                           'parcela', o.parcela || '/' || o.parcelas)
                         order by o.vence)
-          from controlai._ocorrencias(v_ledger, v_prox, v_prox) o where o.a_pagar), '[]'::json),
+          from controlai._ocorrencias(v_ledger, v_prox, v_prox) o
+         where o.a_pagar and not controlai._entrada(o.category_id)), '[]'::json),
+      -- receita emitida e não recebida (inadimplência); marcar_pago dá baixa
+      'total_a_receber', (select round(coalesce(sum(amount_cents), 0) / 100.0, 2) from rec),
+      'a_receber', coalesce((
+        select json_agg(json_build_object('id', id, 'descricao', descricao, 'categoria', categoria,
+                                          'vencimento', to_char(spent_on, 'YYYY-MM-DD'),
+                                          'valor', round(amount_cents / 100.0, 2), 'atrasada', atrasada)
+                        order by spent_on)
+          from rec), '[]'::json),
       -- restantes e falta ficam nulos em série sem fim
       'series', coalesce((
         select json_agg(json_build_object('fixa_id', r.id, 'descricao', nullif(r.description, ''),

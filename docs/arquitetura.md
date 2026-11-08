@@ -701,9 +701,69 @@ projeção cai no "maior despesa"). Conector 1.4.0, com 15 ferramentas.
 
 ---
 
+## 10f. Receita e DRE (1.7.0)
+
+Para servir também a empresa (a Lad Sistemas, com o levantamento feito pela
+sessão daniel_vault) e montar o DRE.
+
+**Receita é um lançamento numa categoria de entrada.** A natureza mora na
+categoria (`controlai.category.natureza`), como a natureza de uma conta contábil:
+`receita` e `entrada_fora` são entradas; `despesa` (o padrão), `deducao`
+(imposto sobre a receita: DAS, ISS), `custo` (do serviço), `financeira` (taxa de
+boleto, juros) e `saida_fora` são saídas. `entrada_fora`/`saida_fora` ficam fora
+do DRE (empréstimo de sócio, aporte, transferência, estorno) e só entram no saldo
+do caixa. A subcategoria herda a natureza do pai e a grava também; mudar a da
+principal leva as subcategorias e o histórico (o DRE dos meses passados se refaz).
+
+Por que não uma tabela de receita: a mensalidade é uma fixa, o boleto emitido e
+não pago é o "a pagar" do outro lado (aqui "a receber"), a forma é onde entrou o
+dinheiro, a exportação e o conector já existem. Tudo isso veio de graça; o custo
+foi filtrar as saídas onde antes se somava tudo: `_total_mes`, `_orcamento`,
+`_previstas`, a lista de pendentes, `meses_com_gasto` e o resumo/contas a pagar
+da IA usam `controlai._entrada(category_id)`. Limite não aceita categoria de
+entrada.
+
+**O snapshot separa os lados.** `controlai_mes` devolve `expenses` só com as
+saídas (o front 1.6.0 lê só essa chave e continua certo com o SQL novo),
+`receitas` com as entradas e `dre`. O DRE é `controlai._dre(ledger, mes)`, uma
+definição só (app e IA): receita, deducao, receita_liquida, custo, lucro_bruto,
+despesa, financeira, resultado, entrada_fora, saida_fora, saldo e a_receber, em
+centavos; o front só desenha (`linhasDRE` esconde dedução e custo quando zerados,
+então a carteira pessoal vê Receita − Despesas = Resultado). O card "Resultado
+do mês" só aparece quando a carteira tem alguma categoria que não é `despesa`.
+
+**Regime.** O DRE conta pelo mês da data do lançamento, pago ou não, igual ao
+total do mês; `a_receber` mostra quanto da receita ainda não entrou. Receita se
+lança BRUTA, com a taxa do gateway como `financeira` à parte (senão o DRE
+esconde o custo de cobrança).
+
+**Conector 1.7.0** (16 ferramentas): `lancar_receita` é a mesma RPC de
+`lancar_despesa` com `p_tipo` fixo, que confere o lado da categoria (sem isso
+"recebi 500 de Mercado" viraria despesa calada); `contexto` devolve a natureza;
+`criar_categoria` aceita `natureza`; `resumo_do_mes` traz `dre` e
+`receitas_por_categoria` (o resto continua só de saídas); `contas_a_pagar` traz
+`a_receber`.
+
+**Front:** o formulário alterna Despesa | Receita (o lado filtra as categorias);
+a aba Despesas lista as receitas em verde com "+"; o plano de contas tem a
+natureza; o PDF ganha o DRE e as entradas; CSV e Excel ganham a coluna Tipo.
+
+Verificado: `checks.sql` bloco 13 (25 asserts: natureza, herança, totais só de
+saídas, DRE com subtotais, fixa de receita a receber fora do "a pagar",
+conector) e `tests/unit.mjs` (`linhasDRE`, `ehEntrada`, coluna Tipo).
+
+Ficou fora: **duas datas** (competência e recebimento; hoje uma data só, e o
+DRE e o caixa usam a mesma); **cliente** e **projeto/centro de custo** em cada
+lançamento (a descrição e categorias/carteiras separadas cobrem por enquanto);
+**importação** do extrato do Pagar.me (as colunas já separam bruto e taxa);
+receita **prevista** no mês futuro (o "Já comprometido" é só de saídas); DRE
+acumulado do ano.
+
+---
+
 ## 11. O que ficou fora da v1
 
-Receitas (o app é só de despesa), múltiplas moedas e anexo de comprovante. OAuth no conector MCP também ficou fora: para conector
+Múltiplas moedas e anexo de comprovante. OAuth no conector MCP também ficou fora: para conector
 pessoal o claude.ai aceita servidor sem autenticação, e o token na URL já é o
 mesmo nível de segredo do link da carteira. O modelo comporta todos — nenhum
 exigiria migração destrutiva.

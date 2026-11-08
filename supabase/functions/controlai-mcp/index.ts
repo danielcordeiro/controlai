@@ -18,7 +18,7 @@
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-const VERSAO = "1.4.0";
+const VERSAO = "1.7.0";
 const PROTOCOLO_PADRAO = "2025-06-18";
 
 const CORS = {
@@ -31,13 +31,30 @@ const CORS = {
 };
 
 // ----------------------------------------------------------------- ferramentas
-// `rpc` é a função no Postgres; `args` mapeia o argumento do MCP para o parâmetro.
+// `rpc` é a função no Postgres; `mapa` liga o argumento do MCP ao parâmetro;
+// `fixos` vai sempre (lancar_despesa e lancar_receita são a mesma RPC).
 type Ferramenta = {
   name: string;
   description: string;
   rpc: string;
   inputSchema: Record<string, unknown>;
   mapa: Record<string, string>;
+  fixos?: Record<string, unknown>;
+};
+
+const PROPS_LANCAR = {
+  valor: { type: "number", description: "Valor em reais, ex.: 62.90" },
+  categoria: { type: "string", description: "Nome da categoria, ex.: Mercado" },
+  data: { type: "string", description: "AAAA-MM-DD. Omita para hoje." },
+  forma_pagamento: { type: "string", description: "Ex.: Pix, Cartão de crédito. Opcional." },
+  descricao: { type: "string", description: "Texto curto, ex.: 'feira da semana'. Opcional." },
+};
+const MAPA_LANCAR = {
+  valor: "p_valor",
+  categoria: "p_categoria",
+  data: "p_data",
+  forma_pagamento: "p_forma",
+  descricao: "p_descricao",
 };
 
 const FERRAMENTAS: Ferramenta[] = [
@@ -45,7 +62,10 @@ const FERRAMENTAS: Ferramenta[] = [
     name: "contexto",
     description:
       "Lê o contexto da carteira: nome, data de hoje, mês atual, categorias (com subcategorias) e formas de pagamento disponíveis. " +
-      "Chame ANTES de lançar a primeira despesa da conversa, para usar nomes de categoria que existem de verdade.",
+      "Cada categoria tem 'natureza': 'receita' e 'entrada_fora' são entradas (use lancar_receita); 'despesa', 'custo', " +
+      "'deducao' (impostos sobre a receita), 'financeira' (taxas, juros) e 'saida_fora' são saídas (lancar_despesa). " +
+      "'entrada_fora' e 'saida_fora' ficam fora do DRE (empréstimo, aporte, transferência). " +
+      "Chame ANTES do primeiro lançamento da conversa, para usar nomes de categoria que existem de verdade.",
     rpc: "controlai_api_contexto",
     inputSchema: { type: "object", properties: {}, required: [] },
     mapa: {},
@@ -56,26 +76,24 @@ const FERRAMENTAS: Ferramenta[] = [
       "Lança uma despesa. Valor em reais (62.90, não centavos). A categoria é pelo NOME e aceita sem acento ou abreviada " +
       "('alimentacao', 'morad'). Data no formato AAAA-MM-DD; se omitida, usa hoje. Forma de pagamento é opcional. " +
       "O retorno traz 'limites': o total do mês e a categoria lançada, só os que têm limite ('livre', 'passou'); " +
-      "se vier 'limites', diga quanto ficou livre.",
+      "se vier 'limites', diga quanto ficou livre. Só aceita categoria de saída; receita é lancar_receita.",
     rpc: "controlai_api_lancar",
-    inputSchema: {
-      type: "object",
-      properties: {
-        valor: { type: "number", description: "Valor em reais, ex.: 62.90" },
-        categoria: { type: "string", description: "Nome da categoria, ex.: Mercado" },
-        data: { type: "string", description: "AAAA-MM-DD. Omita para hoje." },
-        forma_pagamento: { type: "string", description: "Ex.: Pix, Cartão de crédito. Opcional." },
-        descricao: { type: "string", description: "Texto curto, ex.: 'feira da semana'. Opcional." },
-      },
-      required: ["valor", "categoria"],
-    },
-    mapa: {
-      valor: "p_valor",
-      categoria: "p_categoria",
-      data: "p_data",
-      forma_pagamento: "p_forma",
-      descricao: "p_descricao",
-    },
+    inputSchema: { type: "object", properties: PROPS_LANCAR, required: ["valor", "categoria"] },
+    mapa: MAPA_LANCAR,
+    fixos: { p_tipo: "despesa" },
+  },
+  {
+    name: "lancar_receita",
+    description:
+      "Lança uma entrada de dinheiro (salário, mensalidade de cliente, venda, aporte) numa categoria de natureza " +
+      "'receita' ou 'entrada_fora' (veja contexto). Mesmos campos de lancar_despesa; a data é a do recebimento. " +
+      "Lance a receita BRUTA: a taxa do gateway (boleto, Pix cobrado) é uma despesa à parte, de natureza " +
+      "'financeira', senão o DRE esconde o custo de cobrança. Receita que se repete todo mês (mensalidade) é " +
+      "criar_fixa com a categoria de receita; com confirmar=true cada mês nasce 'a receber' e a baixa é marcar_pago.",
+    rpc: "controlai_api_lancar",
+    inputSchema: { type: "object", properties: PROPS_LANCAR, required: ["valor", "categoria"] },
+    mapa: MAPA_LANCAR,
+    fixos: { p_tipo: "receita" },
   },
   {
     name: "resumo_do_mes",
@@ -89,7 +107,11 @@ const FERRAMENTAS: Ferramenta[] = [
       "'passou', 'vai_passar' e 'categorias', com o mesmo para cada categoria que tem limite. É a resposta para " +
       "'quanto ainda posso gastar?' e 'vou estourar?'. NUNCA extrapole o total por conta própria: fixas e parcelas " +
       "já estão lançadas desde o dia 1; use orcamento.projecao. " +
-      "Mês no formato AAAA-MM; se omitido, o mês corrente. É a resposta para 'para onde foi meu dinheiro?'.",
+      "Mês no formato AAAA-MM; se omitido, o mês corrente. É a resposta para 'para onde foi meu dinheiro?'. " +
+      "Tudo acima é só de SAÍDAS. As entradas vêm em 'receitas_por_categoria' e no 'dre', em reais: receita, " +
+      "deducao, receita_liquida, custo, lucro_bruto, despesa, financeira, resultado, entrada_fora, saida_fora, " +
+      "saldo (o que sobrou no caixa, contando o fora do DRE) e a_receber. É a resposta para 'deu lucro?' e " +
+      "'monte o DRE'.",
     rpc: "controlai_api_resumo",
     inputSchema: {
       type: "object",
@@ -347,7 +369,9 @@ const FERRAMENTAS: Ferramenta[] = [
       "O que falta pagar na carteira: 'atrasadas' (vencimento antes de hoje) e 'vencem_este_mes', cada uma com id, " +
       "e os totais de cada grupo; 'proximas' traz as do mês que vem que vão pedir confirmação (ainda sem id); " +
       "'series' traz o andamento só das séries que pedem confirmação (boleto, carnê); o parcelado no cartão está " +
-      "em listar_fixas. É a resposta para 'o que falta pagar?' e o jeito de achar o id antes de 'marcar_pago'.",
+      "em listar_fixas. É a resposta para 'o que falta pagar?' e o jeito de achar o id antes de 'marcar_pago'. " +
+      "'a_receber' e 'total_a_receber' são as receitas ainda não recebidas (inadimplência), com id e 'atrasada'; " +
+      "a baixa também é marcar_pago.",
     rpc: "controlai_api_contas_a_pagar",
     inputSchema: { type: "object", properties: {}, required: [] },
     mapa: {},
@@ -356,17 +380,23 @@ const FERRAMENTAS: Ferramenta[] = [
     name: "criar_categoria",
     description:
       "Cria uma categoria nova no plano de contas. Use só quando a pessoa pedir ou quando a categoria realmente não existir " +
-      "(lancar_despesa avisa e lista as existentes). Informe 'pai' para criar uma subcategoria.",
+      "(lancar_despesa avisa e lista as existentes). Informe 'pai' para criar uma subcategoria (ela herda a natureza " +
+      "do pai). 'natureza' diz se é entrada ou saída e em que linha do DRE cai; o padrão é 'despesa'.",
     rpc: "controlai_api_criar_categoria",
     inputSchema: {
       type: "object",
       properties: {
         nome: { type: "string", description: "Nome da categoria." },
         pai: { type: "string", description: "Categoria pai, para criar uma subcategoria. Opcional." },
+        natureza: {
+          type: "string",
+          enum: ["receita", "entrada_fora", "deducao", "custo", "despesa", "financeira", "saida_fora"],
+          description: "Só na categoria principal. Omita para 'despesa'.",
+        },
       },
       required: ["nome"],
     },
-    mapa: { nome: "p_nome", pai: "p_pai" },
+    mapa: { nome: "p_nome", pai: "p_pai", natureza: "p_natureza" },
   },
 ];
 
@@ -413,7 +443,7 @@ async function chamaRpc(fn: string, params: Record<string, unknown>) {
 async function executaFerramenta(nome: string, args: Record<string, unknown>, token: string) {
   const f = FERRAMENTAS.find((x) => x.name === nome);
   if (!f) throw new Error(`Ferramenta desconhecida: ${nome}`);
-  const params: Record<string, unknown> = { p_token: token };
+  const params: Record<string, unknown> = { p_token: token, ...f.fixos };
   for (const [de, para] of Object.entries(f.mapa)) {
     const v = args?.[de];
     // string vazia é "não informou"; false e 0 são valores e precisam passar

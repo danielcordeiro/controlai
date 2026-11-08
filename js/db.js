@@ -171,10 +171,12 @@ export const db = {
     rpc("controlai_set_limite", { p_ledger: ledgerId, p_category: categoryId || null, p_limite_cents: cents ?? null }),
 
   // ---- plano de contas ------------------------------------------------------
-  addCategoria: (ledgerId, name, parentId, color) =>
-    rpc("controlai_add_categoria", { p_ledger: ledgerId, p_name: name, p_parent: parentId || null, p_color: color || null }),
-  updateCategoria: (ledgerId, categoryId, name, color, archived) =>
-    rpc("controlai_update_categoria", { p_ledger: ledgerId, p_category: categoryId, p_name: name, p_color: color || null, p_archived: archived ?? null }),
+  addCategoria: (ledgerId, name, parentId, color, natureza) =>
+    rpc("controlai_add_categoria", { p_ledger: ledgerId, p_name: name, p_parent: parentId || null, p_color: color || null,
+      p_natureza: natureza || null }),
+  updateCategoria: (ledgerId, categoryId, name, color, archived, natureza) =>
+    rpc("controlai_update_categoria", { p_ledger: ledgerId, p_category: categoryId, p_name: name, p_color: color || null,
+      p_archived: archived ?? null, p_natureza: natureza || null }),
   delCategoria: (ledgerId, categoryId) =>
     rpc("controlai_del_categoria", { p_ledger: ledgerId, p_category: categoryId }),
 

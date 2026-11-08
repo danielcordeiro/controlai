@@ -9,13 +9,13 @@ import {
 } from "./ui.js";
 import {
   porCategoria, porDia, totalCentavos, maioresDespesas, montaCSV,
-  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal, arvoreFormas,
+  resumoAPagar, andamentoFixa, linhasLimites, barraDoTotal, arvoreFormas, linhasDRE, ehEntrada, NATUREZAS,
 } from "./report.js";
 import { despesasParaXLSX } from "./xlsx.js";
 
 // Versão visível no rodapé de Ajustes: toda publicação muda, para dar para
 // conferir no aparelho que a versão nova chegou.
-const VERSAO = "1.6.0";
+const VERSAO = "1.7.0";
 
 const root = () => document.getElementById("app");
 
@@ -606,6 +606,7 @@ function abaMes() {
       cardTotal(total, anterior, aPagar),
       cardAPagar(),
       cardLimites(),
+      cardDRE(),
       el("div", { class: "card empty" }, [
         el("h2", { text: "Nenhuma despesa neste mês" }),
         el("p", { text: "Toque em “＋ Despesa” para lançar a primeira." }),
@@ -625,6 +626,7 @@ function abaMes() {
     cardTotal(total, anterior, aPagar),
     cardAPagar(),
     cardLimites(),
+    cardDRE(),
 
     el("div", { class: "kpis" }, [
       kpi(String(desp.length), desp.length === 1 ? "lançamento" : "lançamentos"),
@@ -664,6 +666,30 @@ function abaMes() {
   ]);
 }
 
+/** A carteira tem alguma categoria que não é despesa? Só então o DRE aparece. */
+function usaDRE() {
+  return (state.snapshot?.categories || []).some((c) => (c.natureza || "despesa") !== "despesa");
+}
+
+/** Resultado do mês (DRE): as contas vêm de controlai._dre, aqui só desenha. */
+function cardDRE() {
+  const d = state.snapshot?.dre;
+  const linhas = usaDRE() ? linhasDRE(d) : [];
+  if (!linhas.length) return null;
+  return el("div", {}, [
+    el("h3", { class: "section", text: "Resultado do mês" }),
+    el("div", { class: "card dre" }, [
+      ...linhas.map((l) => el("div", { class: `dre__linha dre__linha--${l.tipo}` }, [
+        el("span", { text: l.rotulo }),
+        el("b", { class: l.tipo === "total" ? (l.cents < 0 ? "neg" : "pos") : null, text: fmtBRL(l.cents) }),
+      ])),
+      d.a_receber
+        ? el("p", { class: "small muted", style: "margin:8px 0 0", text: `${fmtBRL(d.a_receber)} da receita ainda a receber.` })
+        : null,
+    ]),
+  ]);
+}
+
 /**
  * Relatório do mês pela impressão do navegador ("Salvar como PDF"): texto
  * selecionável, quebra de página do próprio navegador e nenhuma lib. Fora da
@@ -679,9 +705,28 @@ function imprimirRelatorio(arvore, total, aPagar) {
     return [
       cat?.parent_id ? cat.name : null,
       d.parcelas ? `parcela ${d.parcela}/${d.parcelas}` : d.recurring_id ? "fixa" : null,
-      !d.a_pagar ? null : d.spent_on < hoje ? "atrasada" : "a pagar",
+      !d.a_pagar ? null : d.spent_on < hoje ? "atrasada" : ehEntrada(cat) ? "a receber" : "a pagar",
     ].filter(Boolean).join(" · ");
   };
+  const blocoArvore = (arv) => arv.map((f) => el("section", {}, [
+    el("h2", {}, [el("span", { text: f.name }), el("span", { text: `${fmtBRL(f.cents)} · ${f.pctExib}%` })]),
+    ...f.cats.map((c) => el("table", {}, [
+      el("thead", {}, el("tr", {}, [
+        el("th", { colspan: "2", text: c.name }),
+        el("th", { text: fmtBRL(c.cents) }),
+      ])),
+      el("tbody", {}, c.itens.map((d) => el("tr", {}, [
+        el("td", { text: dataCurta(d.spent_on) }),
+        el("td", {}, [
+          d.description || cats.get(d.category_id)?.name || "Despesa",
+          detalhe(d) ? el("span", { class: "relatorio__det", text: ` · ${detalhe(d)}` }) : null,
+        ]),
+        el("td", { text: fmtBRL(d.amount_cents) }),
+      ]))),
+    ])),
+  ]));
+  const receitas = s.receitas || [];
+  const dre = usaDRE() ? linhasDRE(s.dre) : [];
 
   document.querySelector(".relatorio")?.remove();
   const rel = el("div", { class: "relatorio" }, [
@@ -689,27 +734,19 @@ function imprimirRelatorio(arvore, total, aPagar) {
     el("p", { class: "relatorio__sub",
       text: `${s.ledger.name} · gerado em ${dataCurta(hoje)}/${hoje.slice(0, 4)} pelo Controlaí` }),
     el("p", { class: "relatorio__total" }, [
-      "Total do mês ", el("b", { text: fmtBRL(total) }),
+      receitas.length ? "Saídas do mês " : "Total do mês ", el("b", { text: fmtBRL(total) }),
       ` · ${n} ${n === 1 ? "lançamento" : "lançamentos"}`,
       aPagar ? ` · pago ${fmtBRL(total - aPagar)} · a pagar ${fmtBRL(aPagar)}` : "",
     ]),
-    ...arvore.map((f) => el("section", {}, [
-      el("h2", {}, [el("span", { text: f.name }), el("span", { text: `${fmtBRL(f.cents)} · ${f.pctExib}%` })]),
-      ...f.cats.map((c) => el("table", {}, [
-        el("thead", {}, el("tr", {}, [
-          el("th", { colspan: "2", text: c.name }),
-          el("th", { text: fmtBRL(c.cents) }),
-        ])),
-        el("tbody", {}, c.itens.map((d) => el("tr", {}, [
-          el("td", { text: dataCurta(d.spent_on) }),
-          el("td", {}, [
-            d.description || cats.get(d.category_id)?.name || "Despesa",
-            detalhe(d) ? el("span", { class: "relatorio__det", text: ` · ${detalhe(d)}` }) : null,
-          ]),
-          el("td", { text: fmtBRL(d.amount_cents) }),
-        ]))),
-      ])),
-    ])),
+    dre.length ? el("p", { class: "relatorio__bloco", text: "Resultado do mês" }) : null,
+    dre.length
+      ? el("table", { class: "relatorio__dre" }, el("tbody", {}, dre.map((l) =>
+          el("tr", { class: `relatorio__dre--${l.tipo}` }, [el("td", { text: l.rotulo }), el("td", { text: fmtBRL(l.cents) })]))))
+      : null,
+    receitas.length ? el("p", { class: "relatorio__bloco", text: "Saídas" }) : null,
+    ...blocoArvore(arvore),
+    receitas.length ? el("p", { class: "relatorio__bloco", text: "Entradas" }) : null,
+    ...blocoArvore(arvoreFormas(receitas, s.categories || [], s.payment_methods || [])),
   ]);
 
   const titulo = document.title;
@@ -784,7 +821,9 @@ function vazioFuturo() {
 function cardAPagar() {
   const s = state.snapshot;
   const pendentes = s.pendentes || [];
-  if (!pendentes.length && !(s.fixas || []).some((f) => f.confirmar && f.ativa)) return null;
+  const cats = new Map((s.categories || []).map((c) => [c.id, c]));
+  if (!pendentes.length
+      && !(s.fixas || []).some((f) => f.confirmar && f.ativa && !ehEntrada(cats.get(f.category_id)))) return null;
   const hoje = hojeISO();
   const r = resumoAPagar(pendentes, s.proximas, hoje);
   const plural = (n, um, varios) => `${n} ${n === 1 ? um : varios}`;
@@ -1190,7 +1229,7 @@ function abaDespesas() {
   const s = state.snapshot;
   // o ramo do futuro vem antes do "Nenhuma despesa": lá as previstas contam
   const futuro = ehFuturo();
-  const desp = [...(s.expenses || []), ...(futuro ? s.previstas || [] : [])];
+  const desp = [...(s.expenses || []), ...(s.receitas || []), ...(futuro ? s.previstas || [] : [])];
   if (!desp.length) {
     return futuro ? vazioFuturo() : el("div", { class: "card empty" }, [
       el("h2", { text: "Nenhuma despesa neste mês" }),
@@ -1201,26 +1240,29 @@ function abaDespesas() {
   const formas = new Map((s.payment_methods || []).map((f) => [f.id, f]));
   const hoje = hojeISO();
 
-  return el("div", {}, porDia(desp).map((g) =>
-    el("section", { class: "daygroup" }, [
+  return el("div", {}, porDia(desp).map((g) => {
+    const entrou = totalCentavos(g.itens.filter((d) => ehEntrada(cats.get(d.category_id))));
+    const saiu = g.cents - entrou;
+    return el("section", { class: "daygroup" }, [
       el("div", { class: "daygroup__head" }, [
         el("span", { class: "daygroup__day", text: dataExtenso(g.dia) }),
-        el("span", { class: "daygroup__sum", text: fmtBRL(g.cents) }),
+        el("span", { class: "daygroup__sum", text:
+          [saiu ? fmtBRL(saiu) : null, entrou ? `+${fmtBRL(entrou)}` : null].filter(Boolean).join(" · ") }),
       ]),
       ...g.itens.map((d) => linhaDespesa(d, cats, formas, hoje)),
-    ])
-  ));
+    ]);
+  }));
 }
 
-/** Selos da linha: parcela (3/10) ou fixa, e a situação (a pagar, atrasada, previsto). */
-function tagsDespesa(d, hoje) {
+/** Selos da linha: parcela (3/10) ou fixa, e a situação (a pagar/receber, atrasada, previsto). */
+function tagsDespesa(d, hoje, entrada) {
   return [
     d.parcelas ? el("span", { class: "tag tag--fixa", text: `${d.parcela}/${d.parcelas}` })
       : d.recurring_id ? el("span", { class: "tag tag--fixa", text: "fixa" }) : null,
     d.prevista ? el("span", { class: "tag tag--previsto", text: "previsto" })
       : !d.a_pagar ? null
       : d.spent_on < hoje ? el("span", { class: "tag tag--atrasada", text: "atrasada" })
-      : el("span", { class: "tag tag--apagar", text: "a pagar" }),
+      : el("span", { class: "tag tag--apagar", text: entrada ? "a receber" : "a pagar" }),
   ];
 }
 
@@ -1230,23 +1272,25 @@ function linhaDespesa(d, cats, formas, hoje) {
   const pai = cat?.parent_id ? cats.get(cat.parent_id) : null;
   const nomeCat = cat ? (pai ? `${pai.name} › ${cat.name}` : cat.name) : "Sem categoria";
   const forma = d.payment_method_id ? formas.get(d.payment_method_id)?.name : null;
+  const entrada = ehEntrada(cat);
   const miolo = [
     el("span", { class: "exp__dot", style: `background:${(pai || cat)?.color || "#9ca3af"}` }),
     el("div", { class: "exp__main" }, [
       el("div", { class: "exp__desc", text: d.description || nomeCat }),
       el("div", { class: "exp__meta" }, [
-        ...tagsDespesa(d, hoje),
+        ...tagsDespesa(d, hoje, entrada),
         d.description ? `${nomeCat}${forma ? ` · ${forma}` : ""}` : (forma || "sem forma de pagamento"),
       ]),
     ]),
-    el("span", { class: "exp__amount", text: fmtBRL(d.amount_cents) }),
+    el("span", { class: `exp__amount ${entrada ? "exp__amount--entrada" : ""}`,
+      text: entrada ? `+${fmtBRL(d.amount_cents)}` : fmtBRL(d.amount_cents) }),
   ];
   if (d.prevista) return el("div", { class: "exp exp--prevista" }, miolo);
-  const situacao = !d.a_pagar ? "" : d.spent_on < hoje ? ", atrasada" : ", a pagar";
+  const situacao = !d.a_pagar ? "" : d.spent_on < hoje ? ", atrasada" : entrada ? ", a receber" : ", a pagar";
   // a linha INTEIRA é o alvo: no celular ninguém acerta um texto de 4 letras
   return el("button", {
     class: "exp", type: "button",
-    "aria-label": `Editar ${d.description || nomeCat}, ${fmtBRL(d.amount_cents)}${situacao}`,
+    "aria-label": `Editar ${entrada ? "receita" : "despesa"} ${d.description || nomeCat}, ${fmtBRL(d.amount_cents)}${situacao}`,
     onClick: () => abrirFormDespesa(d),
   }, [...miolo, el("span", { class: "exp__chevron", "aria-hidden": "true", text: "›" })]);
 }
@@ -1265,6 +1309,8 @@ function abrirFormDespesa(despesa) {
   const formas = (s.payment_methods || []).filter((f) => !f.archived || f.id === despesa?.payment_method_id);
 
   const catInicial = cats.find((c) => c.id === despesa?.category_id) || null;
+  // receita é um lançamento numa categoria de entrada: o lado vem da categoria
+  let entrada = ehEntrada(catInicial);
   let paiSel = catInicial ? (catInicial.parent_id || catInicial.id) : null;
   let catSel = catInicial ? catInicial.id : null;
   let formaSel = despesa?.payment_method_id || null;
@@ -1281,9 +1327,32 @@ function abrirFormDespesa(despesa) {
   const chipsCat = el("div", { class: "chips" });
   const chipsForma = el("div", { class: "chips" });
 
+  const chipsTipo = el("div", { class: "chips", role: "group", "aria-label": "Tipo de lançamento" });
+  const rotuloForma = el("label", { class: "label" });
+  const rotuloConfirmar = el("span");
+  function desenhaTipo() {
+    clear(chipsTipo);
+    for (const [v, rotulo] of [[false, "Despesa"], [true, "Receita"]]) {
+      chipsTipo.append(el("button", { class: `chip ${entrada === v ? "chip--on" : ""}`, type: "button", text: rotulo,
+        "aria-pressed": entrada === v ? "true" : "false",
+        onClick: () => {
+          if (entrada === v) return;
+          entrada = v;
+          paiSel = null;
+          catSel = null;
+          desenhaTipo(); desenhaCategorias(); desenhaSubs();
+        } }));
+    }
+    rotuloForma.textContent = entrada ? "Forma de recebimento (opcional)" : "Forma de pagamento (opcional)";
+    rotuloConfirmar.textContent = entrada
+      ? "Preciso confirmar cada recebimento (boleto, Pix cobrado)"
+      : "Preciso confirmar cada pagamento (boleto, carnê)";
+    if (!editando) btnSalvar.textContent = entrada ? "Lançar receita" : "Lançar despesa";
+  }
+
   function desenhaCategorias() {
     clear(chipsCat);
-    for (const c of pais) {
+    for (const c of pais.filter((p) => ehEntrada(p) === entrada)) {
       const on = paiSel === c.id;
       chipsCat.append(el("button", { class: `chip ${on ? "chip--on" : ""}`, type: "button",
         "aria-pressed": on ? "true" : "false",
@@ -1326,14 +1395,16 @@ function abrirFormDespesa(despesa) {
   /** Cria a categoria numa folha POR CIMA do formulário e já a seleciona —
    *  fechar o formulário jogaria fora valor, data e descrição já digitados. */
   function criarCategoriaNoFormulario() {
-    const nome = el("input", { class: "input", placeholder: "Ex.: Pet, Viagem, Presentes", maxlength: "40" });
+    const nome = el("input", { class: "input", maxlength: "40",
+      placeholder: entrada ? "Ex.: Salário, Mensalidades, Vendas" : "Ex.: Pet, Viagem, Presentes" });
     const salvarCat = acaoUnica(async () => {
       const texto = nome.value.trim();
       if (!texto) { toast("Dê um nome para a categoria.", "error"); nome.focus(); return; }
       try {
         const cor = corDisponivel(cats);
-        const novoId = await db.addCategoria(state.ledgerId, texto, null, cor);
-        const nova = { id: novoId, name: texto, color: cor, parent_id: null, archived: false };
+        const natureza = entrada ? "receita" : "despesa";
+        const novoId = await db.addCategoria(state.ledgerId, texto, null, cor, natureza);
+        const nova = { id: novoId, name: texto, color: cor, parent_id: null, archived: false, natureza };
         cats.push(nova);
         pais.push(nova);
         paiSel = novoId;
@@ -1400,18 +1471,18 @@ function abrirFormDespesa(despesa) {
       "Um lançamento por mês, no dia da data acima — que pode ser no mês que vem. Os meses seguintes já aparecem como previstos." }),
     repeticoes.node,
     blocoParcelas,
-    el("label", { class: "choice", style: "margin-top:12px" }, [checkConfirmar, "Preciso confirmar cada pagamento (boleto, carnê)"]),
+    el("label", { class: "choice", style: "margin-top:12px" }, [checkConfirmar, rotuloConfirmar]),
     el("div", { class: "small muted", style: "margin-top:6px", text:
-      "Marcado, cada mês entra “a pagar” até você marcar como paga. No cartão não precisa: a parcela já está paga. "
-      + "O que já venceu antes de hoje entra como pago; se não pagou, abra a despesa e use “Voltar para a pagar”." }),
+      "Marcado, cada mês entra “a pagar” (ou “a receber”) até você dar baixa. No cartão não precisa: a parcela já está paga. "
+      + "O que já venceu antes de hoje entra como pago; se não pagou, abra o lançamento e use “Voltar para a pagar”." }),
   );
   desenhaValorEh();
 
+  const btnSalvar = el("button", { class: "btn btn--primary btn--lg", text: editando ? "Salvar" : "Lançar despesa" });
+  desenhaTipo();
   desenhaCategorias();
   desenhaSubs();
   desenhaFormas();
-
-  const btnSalvar = el("button", { class: "btn btn--primary btn--lg", text: editando ? "Salvar" : "Lançar despesa" });
 
   const salvar = acaoUnica(async () => {
     const cents = parseAmountToCents(valor.value);
@@ -1448,24 +1519,26 @@ function abrirFormDespesa(despesa) {
       fechar();
       // lançou em outro mês? a tela vai junto, senão a despesa "some"
       await recarregar(mesDe(data.value));
-      toast(editando ? "Despesa atualizada."
+      toast(editando ? (entrada ? "Receita atualizada." : "Despesa atualizada.")
         : repetir ? (rep.vezes ? `Criada em ${rep.vezes}x: os próximos meses já aparecem como previstos.` : "Fixa criada: lança todo mês até você cancelar.")
-        : "Despesa lançada.", "success");
+        : entrada ? "Receita lançada." : "Despesa lançada.", "success");
     } catch (err) {
       toast(err.message, "error");
       btnSalvar.disabled = false;
-      btnSalvar.textContent = editando ? "Salvar" : "Lançar despesa";
+      btnSalvar.textContent = editando ? "Salvar" : entrada ? "Lançar receita" : "Lançar despesa";
     }
   });
   btnSalvar.addEventListener("click", salvar);
   valor.addEventListener("keydown", (ev) => { if (ev.key === "Enter") salvar(); });
 
   const corpo = el("div", {}, [
+    !editando ? chipsTipo : null,
     campo("Valor", valor),
     el("label", { class: "label", text: "Categoria" }), chipsCat, chipsSub,
     // a data da parcela a pagar é o vencimento: mudá-la de mês a soltaria da série
-    campo("Data", data, despesa?.a_pagar ? "É o vencimento. Pagou? Use “Marcar como paga”." : null),
-    el("label", { class: "label", text: "Forma de pagamento (opcional)" }), chipsForma,
+    campo("Data", data, !despesa?.a_pagar ? null
+      : entrada ? "É o vencimento. Recebeu? Use “Marcar como recebida”." : "É o vencimento. Pagou? Use “Marcar como paga”."),
+    rotuloForma, chipsForma,
     campo("Descrição (opcional)", descricao),
     !editando
       ? el("div", { style: "margin-top:14px" }, [
@@ -1481,13 +1554,15 @@ function abrirFormDespesa(despesa) {
     editando && (despesa.a_pagar || despesa.recurring_month)
       ? el("button", {
           class: "btn btn--ghost btn--block", type: "button",
-          text: despesa.a_pagar ? "Marcar como paga" : "Voltar para a pagar",
+          text: despesa.a_pagar ? (entrada ? "Marcar como recebida" : "Marcar como paga")
+            : entrada ? "Voltar para a receber" : "Voltar para a pagar",
           onClick: acaoUnica(async () => {
             try {
               await db.marcarPago(state.ledgerId, despesa.id, !!despesa.a_pagar);
               fechar();
               await recarregar();
-              toast(despesa.a_pagar ? "Marcada como paga." : "Voltou para a pagar.", "success");
+              toast(despesa.a_pagar ? (entrada ? "Marcada como recebida." : "Marcada como paga.")
+                : entrada ? "Voltou para a receber." : "Voltou para a pagar.", "success");
             } catch (err) { toast(err.message, "error"); }
           }),
         })
@@ -1496,16 +1571,16 @@ function abrirFormDespesa(despesa) {
       ? el("button", {
           class: "btn btn--danger btn--block",
           type: "button",
-          text: "Excluir despesa",
+          text: entrada ? "Excluir receita" : "Excluir despesa",
           onClick: async () => {
             if (!confirmAction(despesa.a_pagar
               ? "Excluir esta parcela a pagar? Ela fica como “não será paga” e não volta. Se você pagou, use Marcar como paga."
-              : "Excluir esta despesa?")) return;
+              : entrada ? "Excluir esta receita?" : "Excluir esta despesa?")) return;
             try {
               await db.delDespesa(state.ledgerId, despesa.id);
               fechar();
               await recarregar();
-              toast("Despesa excluída.", "success");
+              toast(entrada ? "Receita excluída." : "Despesa excluída.", "success");
             } catch (err) { toast(err.message, "error"); }
           },
         })
@@ -1513,7 +1588,7 @@ function abrirFormDespesa(despesa) {
   ]);
 
   // botão no rodapé grudado: no celular ele ficaria ~600px abaixo do valor
-  const { close } = openModal(editando ? "Editar despesa" : "Nova despesa", corpo, btnSalvar);
+  const { close } = openModal(editando ? (entrada ? "Editar receita" : "Editar despesa") : "Novo lançamento", corpo, btnSalvar);
   const fechar = close;
   setTimeout(() => valor.focus(), 80);
 }
@@ -1524,12 +1599,14 @@ function abaPlano() {
   const cats = s.categories || [];
   const pais = cats.filter((c) => !c.parent_id);
   const novo = el("input", { class: "input", placeholder: "Nova categoria", maxlength: "40" });
+  const natureza = seletorNatureza("despesa");
+  natureza.style.marginTop = "8px";
 
   const criar = acaoUnica(async () => {
     const nome = novo.value.trim();
     if (!nome) return;
     try {
-      await db.addCategoria(state.ledgerId, nome, null, corDisponivel(cats));
+      await db.addCategoria(state.ledgerId, nome, null, corDisponivel(cats), natureza.value);
       novo.value = "";
       await recarregar();
       toast("Categoria criada.", "success");
@@ -1546,8 +1623,10 @@ function abaPlano() {
   return el("div", {}, [
     el("div", { class: "card" }, [
       el("h3", { class: "sheet__title", text: "Plano de contas" }),
-      el("p", { class: "small muted", style: "margin:6px 0 12px", text: "Categorias organizam o relatório do mês. Você pode criar subcategorias dentro de cada uma (ex.: Alimentação › Restaurante)." }),
+      el("p", { class: "small muted", style: "margin:6px 0 12px", text: "Categorias organizam o relatório do mês. Você pode criar subcategorias dentro de cada uma (ex.: Alimentação › Restaurante). "
+        + "A natureza diz se é entrada ou saída e em que linha do Resultado do mês (DRE) ela cai; a subcategoria herda a do pai." }),
       el("div", { class: "addrow" }, [novo, el("button", { class: "btn btn--primary", text: "Criar", onClick: criar })]),
+      natureza,
       el("ul", { class: "list" }, linhas),
     ]),
     cardFormas(),
@@ -1559,6 +1638,9 @@ function itemCategoria(c, filha) {
     el("span", { class: "catrow__dot", style: `background:${c.color}` }),
     el("div", { style: "flex:1;min-width:0" }, [
       el("div", { class: "list__name", text: c.name }),
+      !filha && (c.natureza || "despesa") !== "despesa"
+        ? el("div", { class: "list__sub", text: NATUREZAS.find((n) => n.id === c.natureza)?.rotulo || c.natureza })
+        : null,
       c.archived ? el("span", { class: "badge badge--off", text: "arquivada" }) : null,
     ]),
     el("div", { class: "list__actions" }, [
@@ -1585,16 +1667,21 @@ function abrirFormCategoria(c) {
   const nome = el("input", { class: "input", value: c.name, maxlength: "40" });
   const cor = el("input", { class: "input", type: "color", value: c.color, style: "height:46px;padding:4px" });
   const arquivada = el("input", { type: "checkbox", checked: c.archived });
+  const natureza = c.parent_id ? null : seletorNatureza(c.natureza || "despesa");
 
   const corpo = el("div", {}, [
     el("label", { class: "label", text: "Nome" }), nome,
     el("label", { class: "label", text: "Cor" }), cor,
+    natureza ? el("label", { class: "label", text: "Natureza" }) : null,
+    natureza,
+    natureza ? el("p", { class: "small muted", style: "margin:6px 0 0", text:
+      "Mudar a natureza vale para as subcategorias e para o histórico: os meses passados se refazem." }) : null,
     el("label", { class: "choice", style: "margin-top:12px" }, [arquivada, "Arquivar (some do formulário, histórico continua)"]),
     el("button", {
       class: "btn btn--primary btn--lg", text: "Salvar",
       onClick: async () => {
         try {
-          await db.updateCategoria(state.ledgerId, c.id, nome.value, cor.value, arquivada.checked);
+          await db.updateCategoria(state.ledgerId, c.id, nome.value, cor.value, arquivada.checked, natureza?.value);
           close();
           await recarregar();
           toast("Categoria atualizada.", "success");
@@ -1603,6 +1690,11 @@ function abrirFormCategoria(c) {
     }),
   ]);
   const { close } = openModal("Editar categoria", corpo);
+}
+
+function seletorNatureza(valor) {
+  return el("select", { class: "input", "aria-label": "Natureza da categoria" },
+    NATUREZAS.map((n) => el("option", { value: n.id, selected: n.id === valor ? "" : null, text: n.rotulo })));
 }
 
 function abrirFormSubcategoria(pai) {
@@ -1778,7 +1870,8 @@ function cardFixas() {
               + (f.total_cents ? ` · total ${fmtBRL(f.total_cents)}` : "") }),
             el("div", { class: "list__sub" }, [
               f.ativa ? el("span", { class: "tag tag--fixa", text: "ativa" }) : el("span", { class: "badge badge--off", text: "parada" }),
-              f.confirmar ? el("span", { class: "tag tag--apagar", text: "confirma pagamento" }) : null,
+              ehEntrada(cat) ? el("span", { class: "tag tag--receita", text: "receita" }) : null,
+              f.confirmar ? el("span", { class: "tag tag--apagar", text: ehEntrada(cat) ? "confirma recebimento" : "confirma pagamento" }) : null,
               ` ${situacao}`,
             ]),
           ]),
@@ -2018,7 +2111,8 @@ function montaPromptIA(base, anon, token) {
     "",
     "Funções:",
     "  controlai_api_contexto   {}",
-    "  controlai_api_lancar     {p_valor, p_categoria, p_data?, p_forma?, p_descricao?}",
+    "  controlai_api_lancar     {p_valor, p_categoria, p_data?, p_forma?, p_descricao?, p_tipo?}",
+    "                           -> p_tipo 'despesa' ou 'receita' confere o lado da categoria",
     "  controlai_api_resumo     {p_mes?}            -> total do mês por categoria; o bloco orcamento traz",
     "                           limite, livre, livre_por_dia, projecao e passou (do total e das categorias)",
     "  controlai_api_definir_limite {p_valor, p_categoria?} -> limite do mês em diante; sem categoria é",
@@ -2026,7 +2120,7 @@ function montaPromptIA(base, anon, token) {
     "  controlai_api_listar     {p_mes?, p_categoria?, p_limite?}",
     "  controlai_api_editar     {p_id, p_valor?, p_categoria?, p_data?, p_forma?, p_descricao?}",
     "  controlai_api_apagar     {p_id}",
-    "  controlai_api_criar_categoria {p_nome, p_pai?}",
+    "  controlai_api_criar_categoria {p_nome, p_pai?, p_natureza?}",
     "  controlai_api_criar_fixa {p_valor | p_valor_total, p_categoria, p_meses?, p_dia?, p_forma?,",
     "                            p_descricao?, p_mes_inicio?, p_confirmar?}",
     "                           -> todo mês (sem p_meses) ou parcelado (p_meses = nº de parcelas)",
@@ -2037,6 +2131,9 @@ function montaPromptIA(base, anon, token) {
     "                             p_forma?, p_descricao?, p_confirmar?}",
     "  controlai_api_cancelar_fixa {p_id}",
     "",
+    "Cada categoria tem natureza (veja contexto): receita e entrada_fora são entradas; despesa,",
+    "custo, deducao, financeira e saida_fora são saídas. Receita é lancar numa categoria de entrada;",
+    "o resumo traz o dre (receita, deduções, custos, despesas, resultado, a_receber).",
     "Parcelado (\"10x\"): criar_fixa com p_meses; se disseram o total, p_valor_total",
     "em vez de p_valor. Boleto ou carnê: p_confirmar true. \"Paguei X\": contas_a_pagar",
     "para achar o id e depois marcar_pago.",
